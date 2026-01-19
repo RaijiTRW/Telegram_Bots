@@ -1,0 +1,23 @@
+{
+  "name": "telegram-bots-cli",
+  "version": "1.0.0",
+  "description": "CLI для управления пользователями админ панели",
+  "type": "module",
+  "scripts": {
+    "start": "node --loader ts-node/esm index.ts"
+  },
+  "dependencies": {
+    "ink": "^4.4.1",
+    "ink-text-input": "^5.0.1",
+    "react": "^19.2.3",
+    "@supabase/supabase-js": "^2.39.0",
+    "bcryptjs": "^2.4.3",
+    "nanoid": "^5.0.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/bcryptjs": "^2.4.6",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.0.0"
+  }
+}
