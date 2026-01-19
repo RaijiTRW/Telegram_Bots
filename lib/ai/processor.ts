@@ -46,7 +46,10 @@ export class AIProcessor {
   /**
    * Обработка одного канала
    */
-  async processChannel(channelId: string): Promise<ProcessorResult> {
+  async processChannel(
+    channelId: string,
+    options?: { parseMode?: 'new' | 'old' }
+  ): Promise<ProcessorResult> {
     console.log(`[AIProcessor] Processing single channel ${channelId} via Orchestrator...`);
 
     // Получаем данные канала
@@ -79,7 +82,7 @@ export class AIProcessor {
     }
 
     // Используем Orchestrator для обработки канала
-    const result = await this.orchestrator.processChannel(channel);
+    const result = await this.orchestrator.processChannel(channel, options);
 
     return {
       channelId: result.channelId,

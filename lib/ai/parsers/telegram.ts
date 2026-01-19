@@ -4,9 +4,9 @@
  */
 
 import { TelegramClient, Api } from 'telegram';
-import { StringSession } from 'telegram/sessions';
 import { createHash } from 'crypto';
 import { supabaseAdmin } from '@/lib/supabase/server';
+import { getTelegramClient, isAuthorized as isTelegramAuthorized, disconnectClient } from '@/lib/telegram/client';
 
 // ============================================================================
 // Типы
@@ -30,15 +30,12 @@ export interface TelegramParseResult {
 export interface TelegramParserConfig {
   apiId: number;
   apiHash: string;
-  sessionString?: string;
 }
 
-// ============================================================================
-// Singleton клиент для переиспользования соединения
-// ============================================================================
-
-let clientInstance: TelegramClient | null = null;
-let clientConfig: TelegramParserConfig | null = null;
+type TelegramResolveOptions = {
+  allowJoinViaInvite?: boolean;
+  direction?: 'new' | 'old';
+};
 
 // ============================================================================
 // Telegram Parser Class
@@ -47,12 +44,10 @@ let clientConfig: TelegramParserConfig | null = null;
 export class TelegramParser {
   private apiId: number;
   private apiHash: string;
-  private session: StringSession;
 
   constructor(config: TelegramParserConfig) {
     this.apiId = config.apiId;
     this.apiHash = config.apiHash;
-    this.session = new StringSession(config.sessionString || '');
 
     if (!this.apiId || !this.apiHash) {
       throw new Error('Telegram API ID and API Hash are required. Get them from https://my.telegram.org');
@@ -63,31 +58,14 @@ export class TelegramParser {
    * Получение или создание клиента
    */
   private async getClient(): Promise<TelegramClient> {
-    // Переиспользуем существующий клиент если он подключен
-    if (clientInstance && clientInstance.connected) {
-      return clientInstance;
-    }
-
-    // Создаем новый клиент
-    const client = new TelegramClient(this.session, this.apiId, this.apiHash, {
-      connectionRetries: 5,
-      useWSS: true,
-    });
-
-    await client.connect();
-
-    // Проверяем авторизацию
-    const isAuthorized = await client.isUserAuthorized();
-    if (!isAuthorized) {
+    const authorized = await isTelegramAuthorized();
+    if (!authorized) {
       throw new Error(
-        'Telegram session not authorized. Please run the auth script first: npm run telegram-auth'
+        'Telegram аккаунт (User API) не подключен или не авторизован. Подключите его в разделе «Настройки Telegram».'
       );
     }
 
-    clientInstance = client;
-    clientConfig = { apiId: this.apiId, apiHash: this.apiHash };
-
-    return client;
+    return await getTelegramClient();
   }
 
   /**
@@ -99,34 +77,43 @@ export class TelegramParser {
   async parse(
     channelUrl: string,
     lastMessageId?: number,
-    maxMessages: number = 20
+    maxMessages: number = 20,
+    options?: TelegramResolveOptions
   ): Promise<{ results: TelegramParseResult[]; lastMessageId: number | null }> {
     try {
       const client = await this.getClient();
-      const username = this.extractUsername(channelUrl);
+      let ref = this.extractTelegramRef(channelUrl);
+      if (ref.type === 'username' && ref.value.startsWith('+') && ref.value.length > 1) {
+        ref = { type: 'invite', value: ref.value.slice(1) };
+      }
 
-      // Получаем информацию о канале
-      const channel = await client.getEntity(username);
+      // Получаем entity канала (username / invite)
+      const resolved = await this.resolveChannelEntity(client, ref, options);
+      const channel = resolved.entity;
+      const channelSlug = resolved.slug;
+
+      const direction: 'new' | 'old' = options?.direction === 'old' ? 'old' : 'new';
 
       // Получаем сообщения
-      const messages = await client.getMessages(channel, {
-        limit: maxMessages,
-        minId: lastMessageId || 0, // Только сообщения с ID больше lastMessageId
-      });
+      const messages = await client.getMessages(channel, this.buildGetMessagesParams(direction, lastMessageId, maxMessages));
 
       const results: TelegramParseResult[] = [];
-      let newLastMessageId: number | null = lastMessageId || null;
+      let newLastMessageId: number | null = null;
 
       for (const message of messages) {
         // Пропускаем сообщения без текста
-        const content = message.text || (message as any).caption || '';
-        if (!content || content.trim().length < 30) {
+        const content = (message as any).message || (message as any).text || (message as any).caption || '';
+        if (!content || content.trim().length < 5) {
           continue;
         }
 
-        // Обновляем последний ID
-        if (!newLastMessageId || message.id > newLastMessageId) {
+        // Обновляем cursor ID (new: max id, old: min id)
+        if (!newLastMessageId) {
           newLastMessageId = message.id;
+        } else if (direction === 'new') {
+          if (message.id > newLastMessageId) newLastMessageId = message.id;
+        } else {
+          if (message.id < newLastMessageId) newLastMessageId = message.id;
         }
 
         const cleanedContent = this.cleanText(content);
@@ -136,15 +123,18 @@ export class TelegramParser {
         const hasMedia = !!(message.media);
         let imageUrl: string | undefined;
 
-        if (hasMedia && mediaType === 'photo') {
-          imageUrl = await this.tryDownloadAndStorePhoto(client, username, message);
+        if (hasMedia && (mediaType === 'photo' || mediaType === 'webpage')) {
+          imageUrl = await this.tryDownloadAndStorePhoto(client, channelSlug, message);
         }
 
         results.push({
           contentHash,
           content: cleanedContent,
-          url: `https://t.me/${username}/${message.id}`,
-          publishedAt: new Date(message.date * 1000),
+          url: this.buildMessageUrl(channelSlug, channel as any, message.id),
+          publishedAt:
+            (message as any).date instanceof Date
+              ? ((message as any).date as Date)
+              : new Date(Number((message as any).date || 0) * 1000),
           metadata: {
             messageId: message.id,
             hasMedia,
@@ -157,7 +147,7 @@ export class TelegramParser {
 
       return {
         results,
-        lastMessageId: newLastMessageId,
+        lastMessageId: newLastMessageId ?? (lastMessageId || null),
       };
     } catch (error: any) {
       // Обработка специфичных ошибок Telegram
@@ -167,7 +157,11 @@ export class TelegramParser {
       if (error.message?.includes('USERNAME_INVALID')) {
         throw new Error(`Неверное имя канала: ${channelUrl}`);
       }
-      if (error.message?.includes('session not authorized')) {
+      if (
+        error.message?.includes('session not authorized') ||
+        error.message?.includes('не подключен') ||
+        error.message?.includes('не авторизован')
+      ) {
         throw error;
       }
 
@@ -175,17 +169,169 @@ export class TelegramParser {
     }
   }
 
+  private buildGetMessagesParams(
+    direction: 'new' | 'old',
+    cursorMessageId: number | undefined,
+    limit: number
+  ): Record<string, unknown> {
+    if (direction === 'old') {
+      return cursorMessageId
+        ? {
+            limit,
+            maxId: cursorMessageId, // сообщения с ID меньше cursorMessageId
+          }
+        : {
+            limit,
+          };
+    }
+
+    return cursorMessageId
+      ? {
+          limit,
+          minId: cursorMessageId, // сообщения с ID больше cursorMessageId
+        }
+      : {
+          limit,
+        };
+  }
+
   /**
-   * Извлечение username из URL
+   * Извлечение ссылки на канал (username или invite hash)
    */
-  private extractUsername(input: string): string {
-    let username = input
+  private extractTelegramRef(input: string): { type: 'username'; value: string } | { type: 'invite'; value: string } {
+    const raw = String(input || '').trim();
+
+    const tryParseUrl = (value: string): string | null => {
+      try {
+        const normalized = value.startsWith('http://') || value.startsWith('https://') ? value : `https://${value}`;
+        const u = new URL(normalized);
+        if (!/(^|\.)t\.me$|(^|\.)telegram\.me$/i.test(u.hostname)) return null;
+        const path = decodeURIComponent(u.pathname || '').replace(/^\/+/, '');
+        return path || null;
+      } catch {
+        return null;
+      }
+    };
+
+    const parsedPath = tryParseUrl(raw);
+    if (parsedPath) {
+      // /+HASH or /%2BHASH (decoded already)
+      if (parsedPath.startsWith('+') && parsedPath.length > 1) {
+        return { type: 'invite', value: parsedPath.slice(1).split(/[/?#]/)[0] };
+      }
+      if (parsedPath.toLowerCase().startsWith('joinchat/')) {
+        return { type: 'invite', value: parsedPath.slice('joinchat/'.length).split(/[/?#]/)[0] };
+      }
+      // username/<message_id> -> username
+      const username = parsedPath.split('/')[0];
+      if (username) return { type: 'username', value: username.replace(/^@/, '') };
+    }
+
+    // Invite links:
+    // - https://t.me/+HASH
+    // - https://t.me/joinchat/HASH
+    // - https://t.me/%2BHASH
+    // - t.me/+HASH
+    // - t.me/joinchat/HASH
+    // - +HASH
+    const mInvite =
+      raw.match(/^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/\+([A-Za-z0-9_-]+)(?:[/?#].*)?$/) ||
+      raw.match(/^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/joinchat\/([A-Za-z0-9_-]+)(?:[/?#].*)?$/) ||
+      raw.match(/^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/%2B([A-Za-z0-9_-]+)(?:[/?#].*)?$/i) ||
+      raw.match(/^\+([A-Za-z0-9_-]+)$/);
+
+    if (mInvite?.[1]) {
+      return { type: 'invite', value: mInvite[1] };
+    }
+
+    // Username or @username
+    const username = raw
       .replace(/^https?:\/\/t\.me\//, '')
+      .replace(/^https?:\/\/telegram\.me\//, '')
+      .replace(/^(?:t\.me|telegram\.me)\//, '')
       .replace(/^@/, '')
       .replace(/\/$/, '')
-      .split('/')[0]; // Убираем всё после первого слеша
+      .split('/')[0];
 
-    return username;
+    // If the input looks like an invite but didn't match above (edge cases)
+    if (username.startsWith('+') && /^[+][A-Za-z0-9_-]+$/.test(username)) {
+      return { type: 'invite', value: username.slice(1) };
+    }
+
+    return { type: 'username', value: username };
+  }
+
+  private async resolveChannelEntity(
+    client: TelegramClient,
+    ref: { type: 'username'; value: string } | { type: 'invite'; value: string },
+    options?: TelegramResolveOptions
+  ): Promise<{ entity: any; slug: string }> {
+    if (ref.type === 'username') {
+      const username = ref.value;
+      const entity = await client.getEntity(username);
+      return { entity, slug: username };
+    }
+
+    const hash = ref.value;
+    const checked = await client.invoke(new Api.messages.CheckChatInvite({ hash }));
+
+    // Already joined: we can use the chat directly.
+    if ((checked as any).chat) {
+      const chat = (checked as any).chat;
+      try {
+        const entity = await client.getEntity(chat);
+        const slug = this.slugFromEntity(entity);
+        return { entity, slug };
+      } catch {
+        const slug = this.slugFromEntity(chat);
+        return { entity: chat, slug };
+      }
+    }
+
+    // Not joined yet — require explicit allowJoinViaInvite.
+    if (!options?.allowJoinViaInvite) {
+      throw new Error(
+        'Это приватный Telegram-канал по инвайту. Чтобы парсить его, аккаунт Telegram (User API) должен быть подписан/вступить. ' +
+        'Либо включите allowJoinViaInvite в parsing_config источника.'
+      );
+    }
+
+    const imported = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+    const chats: any[] = (imported as any).chats || [];
+    const chat = chats.find(c => c?.className?.includes('Channel')) || chats[0];
+    if (!chat) {
+      throw new Error('Не удалось вступить по инвайту или получить чат');
+    }
+
+    try {
+      const entity = await client.getEntity(chat);
+      const slug = this.slugFromEntity(entity);
+      return { entity, slug };
+    } catch {
+      const slug = this.slugFromEntity(chat);
+      return { entity: chat, slug };
+    }
+  }
+
+  private slugFromEntity(entity: any): string {
+    const username = String((entity as any)?.username || '').trim();
+    if (username) return username;
+    const id = Number((entity as any)?.id || 0);
+    if (Number.isFinite(id) && id > 0) return `c/${id}`;
+    return 'c/unknown';
+  }
+
+  private buildMessageUrl(channelSlug: string, entity: any, messageId: number): string {
+    if (!channelSlug) return String(messageId);
+    // If we already have username
+    if (!channelSlug.startsWith('c/')) {
+      return `https://t.me/${channelSlug}/${messageId}`;
+    }
+
+    // Private channel/group permalink format: https://t.me/c/<internal_id>/<msg_id>
+    const id = Number((entity as any)?.id || 0);
+    const internalId = Number.isFinite(id) && id > 0 ? String(id) : channelSlug.replace(/^c\//, '');
+    return `https://t.me/c/${internalId}/${messageId}`;
   }
 
   /**
@@ -210,6 +356,7 @@ export class TelegramParser {
       const doc = message.media.document;
       if (doc?.mimeType?.startsWith('video/')) return 'video';
       if (doc?.mimeType?.startsWith('audio/')) return 'audio';
+      if (doc?.mimeType?.startsWith('image/')) return 'photo';
       return 'document';
     }
     if (mediaClass === 'MessageMediaWebPage') return 'webpage';
@@ -275,17 +422,23 @@ export class TelegramParser {
     try {
       await this.ensureImageBucketExists();
 
-      const downloaded = await client.downloadMedia(message, {});
+      const media = (message as any)?.media || (message as any)?.photo || message;
+      const downloaded = await client.downloadMedia(media, {});
       if (!downloaded || typeof downloaded === 'string') return undefined;
-      if (!Buffer.isBuffer(downloaded) || downloaded.length === 0) return undefined;
-      if (downloaded.length > TelegramParser.MAX_IMAGE_BYTES) return undefined;
+      const buffer = this.toBuffer(downloaded);
+      if (!buffer || buffer.length === 0) return undefined;
+      if (buffer.length > TelegramParser.MAX_IMAGE_BYTES) return undefined;
 
-      const storagePath = `telegram-images/${username}/${message.id}.jpg`;
+      const detected = this.detectImageType(buffer);
+      if (!detected) return undefined;
+      if (!TelegramParser.ALLOWED_IMAGE_TYPES.includes(detected.contentType)) return undefined;
+
+      const storagePath = `telegram-images/${username}/${message.id}.${detected.ext}`;
 
       const { error } = await supabaseAdmin.storage
         .from(TelegramParser.IMAGE_BUCKET)
-        .upload(storagePath, downloaded, {
-          contentType: 'image/jpeg',
+        .upload(storagePath, buffer, {
+          contentType: detected.contentType,
           cacheControl: '3600',
           upsert: false,
         });
@@ -310,11 +463,64 @@ export class TelegramParser {
     }
   }
 
+  private toBuffer(value: unknown): Buffer | null {
+    if (!value) return null;
+    if (Buffer.isBuffer(value)) return value;
+    if (value instanceof Uint8Array) return Buffer.from(value);
+    if (value instanceof ArrayBuffer) return Buffer.from(new Uint8Array(value));
+    return null;
+  }
+
+  private detectImageType(buffer: Buffer): { contentType: string; ext: string } | null {
+    if (buffer.length < 12) return null;
+
+    // JPEG: FF D8 FF
+    if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+      return { contentType: 'image/jpeg', ext: 'jpg' };
+    }
+
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (
+      buffer[0] === 0x89 &&
+      buffer[1] === 0x50 &&
+      buffer[2] === 0x4e &&
+      buffer[3] === 0x47 &&
+      buffer[4] === 0x0d &&
+      buffer[5] === 0x0a &&
+      buffer[6] === 0x1a &&
+      buffer[7] === 0x0a
+    ) {
+      return { contentType: 'image/png', ext: 'png' };
+    }
+
+    // GIF: 47 49 46 38
+    if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) {
+      return { contentType: 'image/gif', ext: 'gif' };
+    }
+
+    // WebP: "RIFF"...."WEBP"
+    if (
+      buffer[0] === 0x52 &&
+      buffer[1] === 0x49 &&
+      buffer[2] === 0x46 &&
+      buffer[3] === 0x46 &&
+      buffer[8] === 0x57 &&
+      buffer[9] === 0x45 &&
+      buffer[10] === 0x42 &&
+      buffer[11] === 0x50
+    ) {
+      return { contentType: 'image/webp', ext: 'webp' };
+    }
+
+    return null;
+  }
+
   /**
-   * Получение текущей session string для сохранения
+   * (Устарело) Ранее использовалось для сохранения TELEGRAM_SESSION в env.
+   * Теперь сессия хранится в таблице telegram_sessions.
    */
   getSessionString(): string {
-    return this.session.save();
+    return '';
   }
 }
 
@@ -325,12 +531,10 @@ export class TelegramParser {
 export function createTelegramParser(config?: Partial<TelegramParserConfig>): TelegramParser {
   const apiId = config?.apiId || parseInt(process.env.TELEGRAM_API_ID || '0', 10);
   const apiHash = config?.apiHash || process.env.TELEGRAM_API_HASH || '';
-  const sessionString = config?.sessionString || process.env.TELEGRAM_SESSION || '';
 
   return new TelegramParser({
     apiId,
     apiHash,
-    sessionString,
   });
 }
 
@@ -339,8 +543,5 @@ export function createTelegramParser(config?: Partial<TelegramParserConfig>): Te
 // ============================================================================
 
 export async function disconnectTelegram(): Promise<void> {
-  if (clientInstance && clientInstance.connected) {
-    await clientInstance.disconnect();
-    clientInstance = null;
-  }
+  await disconnectClient();
 }

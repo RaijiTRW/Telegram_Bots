@@ -10,6 +10,7 @@ import { supabaseAdmin } from '@/lib/supabase/server';
 export interface ParserInput {
   channelId: string;
   sources: Source[];
+  parseMode?: 'new' | 'old';
 }
 
 export interface ParsedImage {
@@ -73,6 +74,7 @@ export class ParserAgent extends BaseAgent {
 
           const { results, lastMessageId } = await parserFactory.parseSource(source, {
             maxItems: 10,
+            parseMode: input.parseMode,
           });
 
           this.log(`Got ${results.length} results from ${source.url}`);
@@ -91,7 +93,7 @@ export class ParserAgent extends BaseAgent {
 
           // Обновляем lastMessageId для Telegram источников
           if (lastMessageId && source.type === 'telegram') {
-            await this.updateSourceLastMessageId(source.id, lastMessageId, source.parsing_config);
+            await this.updateSourceLastMessageId(source.id, lastMessageId, input.parseMode, source.parsing_config);
           }
 
           // Обновляем время последнего парсинга
@@ -335,15 +337,17 @@ export class ParserAgent extends BaseAgent {
   private async updateSourceLastMessageId(
     sourceId: string,
     lastMessageId: number,
+    parseMode: 'new' | 'old' | undefined,
     currentConfig?: unknown
   ): Promise<void> {
     try {
+      const key = parseMode === 'old' ? 'backfillMessageId' : 'lastMessageId';
       await (supabaseAdmin
         .from('sources') as any)
         .update({
           parsing_config: {
             ...(typeof currentConfig === 'object' && currentConfig ? (currentConfig as Record<string, unknown>) : {}),
-            lastMessageId,
+            [key]: lastMessageId,
           },
         })
         .eq('id', sourceId);

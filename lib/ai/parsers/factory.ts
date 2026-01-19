@@ -27,6 +27,7 @@ export interface ParseOptions {
   maxItems?: number;
   lastPublishedDate?: Date;
   lastMessageId?: number;
+  parseMode?: 'new' | 'old';
 }
 
 export interface ParseResponse {
@@ -80,19 +81,31 @@ export class ParserFactory {
     // Проверяем наличие MTProto конфигурации
     if (!this.telegramConfig?.apiId || !this.telegramConfig?.apiHash) {
       throw new Error(
-        'Telegram API credentials not configured. Run: npm run telegram-auth'
+        'Telegram API credentials not configured. Set TELEGRAM_API_ID/TELEGRAM_API_HASH and connect Telegram аккаунт в «Настройки Telegram».'
       );
     }
 
     const parser = new TelegramParser(this.telegramConfig);
 
-    // Извлекаем lastMessageId из parsing_config если есть
+    const parseMode: 'new' | 'old' = options?.parseMode === 'old' ? 'old' : 'new';
+
+    // Извлекаем lastMessageId из parsing_config если есть (для новых)
     const lastMessageId = options?.lastMessageId || source.parsing_config?.lastMessageId;
+    const backfillMessageId = source.parsing_config?.backfillMessageId;
+    const allowJoinViaInvite = Boolean(source.parsing_config?.allowJoinViaInvite);
+
+    const cursorMessageId =
+      parseMode === 'old'
+        ? (typeof backfillMessageId === 'number' && backfillMessageId > 0
+            ? backfillMessageId
+            : (typeof lastMessageId === 'number' && lastMessageId > 0 ? lastMessageId : undefined))
+        : lastMessageId;
 
     const { results, lastMessageId: newLastMessageId } = await parser.parse(
       source.url,
-      lastMessageId,
-      options?.maxItems || 20
+      cursorMessageId,
+      options?.maxItems || 20,
+      { allowJoinViaInvite, direction: parseMode }
     );
 
     return {
@@ -110,6 +123,8 @@ export class ParserFactory {
       ...this.websiteConfig,
       mode: source.parsing_config?.mode || 'feed', // По умолчанию режим ленты
       maxArticles: options?.maxItems || source.parsing_config?.maxArticles || 5,
+      headers: source.parsing_config?.headers || this.websiteConfig?.headers,
+      cookies: source.parsing_config?.cookies || this.websiteConfig?.cookies,
       selectors: {
         ...this.websiteConfig?.selectors,
         ...source.parsing_config?.selectors,
@@ -171,7 +186,7 @@ export class ParserFactory {
     try {
       if (type === 'telegram') {
         // Telegram username или URL
-        return /^(@[\w_]+|https?:\/\/(t\.me|telegram\.me)\/[\w_]+)$/.test(url);
+        return /^(@[\w_]+|https?:\/\/(t\.me|telegram\.me)\/[\w_]+|https?:\/\/t\.me\/\+[\w-]+|https?:\/\/t\.me\/joinchat\/[\w-]+|\+[\w-]+)$/.test(url);
       }
 
       if (type === 'website' || type === 'rss') {
@@ -207,7 +222,6 @@ export function getParserFactory(config?: {
       telegram: {
         apiId: parseInt(process.env.TELEGRAM_API_ID || '0', 10),
         apiHash: process.env.TELEGRAM_API_HASH || '',
-        sessionString: process.env.TELEGRAM_SESSION || '',
       },
       website: {
         timeout: 30000,

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { RichEditor } from './RichEditor';
 import { AIModal } from './AIModal';
@@ -35,12 +35,14 @@ export default function EditorContent({ post: initialPost }: { post: Post }) {
   const [title, setTitle] = useState(initialPost.title || '');
   const [content, setContent] = useState<any>(initialPost.content);
   const [plainText, setPlainText] = useState(initialPost.plain_text);
+  const contentRef = useRef<any>(initialPost.content);
+  const plainTextRef = useRef<string>(initialPost.plain_text);
   const [status, setStatus] = useState(initialPost.status);
   const [isSaving, setIsSaving] = useState(false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [isAIEditing, setIsAIEditing] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [selection, setSelection] = useState<{ text: string; from: number; to: number } | null>(null);
+  const [selection, setSelection] = useState<{ text: string; from: number; to: number; coords?: { top: number; left: number } } | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [publishError, setPublishError] = useState<string | null>(null);
 
@@ -53,7 +55,7 @@ export default function EditorContent({ post: initialPost }: { post: Post }) {
       const response = await fetch(`/api/posts/${initialPost.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, content, plain_text: plainText }),
+        body: JSON.stringify({ title, content: contentRef.current, plain_text: plainTextRef.current }),
       });
 
       if (!response.ok) throw new Error('Ошибка сохранения');
@@ -112,6 +114,8 @@ export default function EditorContent({ post: initialPost }: { post: Post }) {
 
       setContent(data.post.content);
       setPlainText(data.post.plain_text);
+      contentRef.current = data.post.content;
+      plainTextRef.current = data.post.plain_text;
     } catch (error: any) {
       setAiError(error.message);
     } finally {
@@ -136,6 +140,8 @@ export default function EditorContent({ post: initialPost }: { post: Post }) {
 
       setContent(data.post.content);
       setPlainText(data.post.plain_text);
+      contentRef.current = data.post.content;
+      plainTextRef.current = data.post.plain_text;
       setSelection(null);
     } catch (error: any) {
       setAiError(error.message);
@@ -217,7 +223,10 @@ export default function EditorContent({ post: initialPost }: { post: Post }) {
           <RichEditor
             content={content}
             onChange={(newContent, newPlainText) => {
-              setContent(newContent);
+              // Не делаем редактор "controlled" — иначе TipTap сбрасывает selection.
+              // Контент храним в refs и сохраняем по кнопке.
+              contentRef.current = newContent;
+              plainTextRef.current = newPlainText;
               setPlainText(newPlainText);
             }}
             onTextSelect={setSelection}

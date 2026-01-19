@@ -105,7 +105,10 @@ export class Orchestrator {
   /**
    * Обработка одного канала
    */
-  async processChannel(channel: Channel): Promise<OrchestratorResult> {
+  async processChannel(
+    channel: Channel,
+    options?: { parseMode?: 'new' | 'old' }
+  ): Promise<OrchestratorResult> {
     this.log(`Processing channel: ${channel.name}`);
 
     const result: OrchestratorResult = {
@@ -144,6 +147,7 @@ export class Orchestrator {
       const parserResult = await this.parserAgent.execute({
         channelId: channel.id,
         sources,
+        parseMode: options?.parseMode,
       });
 
       if (!parserResult.success || !parserResult.data) {

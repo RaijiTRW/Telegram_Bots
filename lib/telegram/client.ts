@@ -24,12 +24,12 @@ async function getActiveSession(): Promise<string | null> {
       .single();
 
     if (error || !data) {
-      return null;
+      return process.env.TELEGRAM_SESSION || null;
     }
 
     return data.session_string;
   } catch {
-    return null;
+    return process.env.TELEGRAM_SESSION || null;
   }
 }
 

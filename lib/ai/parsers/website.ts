@@ -48,6 +48,8 @@ export interface WebsiteParserConfig {
   baseUrl?: string;
   userAgent?: string;
   timeout?: number;
+  headers?: Record<string, string>;
+  cookies?: string;
 }
 
 // ============================================================================
@@ -76,6 +78,8 @@ export class WebsiteParser {
       baseUrl: config.baseUrl,
       userAgent: config.userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       timeout: config.timeout || 30000,
+      headers: config.headers,
+      cookies: config.cookies,
     };
   }
 
@@ -114,18 +118,38 @@ export class WebsiteParser {
       // Извлекаем базовый URL
       const baseUrl = this.config.baseUrl || new URL(url).origin;
 
-      // Находим ссылки на статьи
-      const articleLinks = this.extractArticleLinks($, baseUrl);
-      console.log(`[WebsiteParser] Found ${articleLinks.length} article links`);
+      // Находим ссылки на статьи (+ по возможности дату из карточки/URL)
+      const articleCandidates = this.extractArticleCandidates($, baseUrl);
+      const articleLinks = articleCandidates.map(c => c.url);
+      console.log(`[WebsiteParser] Found ${articleCandidates.length} article candidates`);
 
-      if (articleLinks.length === 0) {
+      if (articleCandidates.length === 0) {
         // Если ссылок не найдено, парсим страницу как есть
         const singleResult = await this.parseSinglePage(url);
         return singleResult ? [singleResult] : [];
       }
 
-      // Ограничиваем количество статей
-      const linksToProcess = articleLinks.slice(0, this.config.maxArticles);
+      // Сортируем кандидатов так, чтобы сначала идти к самым новым
+      articleCandidates.sort((a, b) => {
+        const at = a.publishedAt?.getTime();
+        const bt = b.publishedAt?.getTime();
+        if (Number.isFinite(bt as any) && Number.isFinite(at as any)) {
+          if (bt !== at) return (bt as number) - (at as number);
+        } else if (Number.isFinite(bt as any)) {
+          return -1;
+        } else if (Number.isFinite(at as any)) {
+          return 1;
+        }
+
+        // больше уверенность — выше
+        if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+        // fallback: порядок на странице
+        return a.order - b.order;
+      });
+
+      // Берем чуть больше кандидатов, чтобы на динамичных страницах отфильтровать пустые/короткие статьи
+      const maxToTry = Math.max(this.config.maxArticles! * 4, this.config.maxArticles!);
+      const linksToProcess = articleCandidates.slice(0, maxToTry).map(c => c.url);
 
       // Парсим каждую статью
       const results: WebsiteParseResult[] = [];
@@ -137,6 +161,10 @@ export class WebsiteParser {
 
           if (articleResult && articleResult.content.length >= 100) {
             results.push(articleResult);
+          }
+
+          if (results.length >= this.config.maxArticles!) {
+            break;
           }
 
           // Небольшая задержка между запросами
@@ -155,10 +183,13 @@ export class WebsiteParser {
   }
 
   /**
-   * Извлечение ссылок на статьи из новостной ленты
+   * Кандидаты статей из новостной ленты (url + дата, если удалось)
    */
-  private extractArticleLinks($: cheerio.CheerioAPI, baseUrl: string): string[] {
-    const links: string[] = [];
+  private extractArticleCandidates(
+    $: cheerio.CheerioAPI,
+    baseUrl: string
+  ): Array<{ url: string; publishedAt?: Date; confidence: number; order: number }> {
+    const items: Array<{ url: string; publishedAt?: Date; confidence: number; order: number }> = [];
     const seenUrls = new Set<string>();
 
     const feedItemSelector = this.config.selectors!.feedItem!;
@@ -168,7 +199,7 @@ export class WebsiteParser {
     const feedItems = $(feedItemSelector);
 
     if (feedItems.length > 0) {
-      feedItems.each((_, item) => {
+      feedItems.each((idx, item) => {
         const $item = $(item);
         const linkElement = $item.find(linkSelector).first();
         const href = linkElement.attr('href');
@@ -177,14 +208,26 @@ export class WebsiteParser {
           const absoluteUrl = this.resolveUrl(href, baseUrl);
           if (absoluteUrl && this.isValidArticleUrl(absoluteUrl, baseUrl) && !seenUrls.has(absoluteUrl)) {
             seenUrls.add(absoluteUrl);
-            links.push(absoluteUrl);
+            const publishedAt = this.extractDateFromFeedItem($item);
+            const urlDate = publishedAt ? undefined : this.extractDateFromUrl(absoluteUrl);
+            const finalDate = publishedAt || urlDate;
+            const urlLooksLikeArticle = this.looksLikeArticleUrl(absoluteUrl);
+            const confidence = (publishedAt ? 3 : urlDate ? 2 : 0) + (urlLooksLikeArticle ? 1 : 0);
+
+            items.push({
+              url: absoluteUrl,
+              publishedAt: finalDate,
+              confidence,
+              order: idx,
+            });
           }
         }
       });
     }
 
     // Если не нашли через элементы ленты, ищем все подходящие ссылки
-    if (links.length === 0) {
+    if (items.length === 0) {
+      let order = 0;
       $('a[href]').each((_, el) => {
         const href = $(el).attr('href');
         if (href) {
@@ -193,14 +236,156 @@ export class WebsiteParser {
             // Проверяем что это похоже на ссылку на статью
             if (this.looksLikeArticleUrl(absoluteUrl)) {
               seenUrls.add(absoluteUrl);
-              links.push(absoluteUrl);
+              const urlDate = this.extractDateFromUrl(absoluteUrl);
+              items.push({
+                url: absoluteUrl,
+                publishedAt: urlDate,
+                confidence: urlDate ? 1 : 0,
+                order: order++,
+              });
             }
           }
         }
       });
     }
 
-    return links;
+    return items;
+  }
+
+  private extractDateFromFeedItem($item: any): Date | undefined {
+    // Common patterns: <time datetime="...">, elements with [datetime], or date-like text
+    const time = $item.find('time').first();
+    const datetime = time.attr('datetime') || time.attr('content') || '';
+    const dateFromDatetime = this.parseDateMaybe(datetime);
+    if (dateFromDatetime) return dateFromDatetime;
+
+    const anyDatetime = $item.find('[datetime]').first().attr('datetime') || '';
+    const dateFromAnyDatetime = this.parseDateMaybe(anyDatetime);
+    if (dateFromAnyDatetime) return dateFromAnyDatetime;
+
+    const dateText = $item.find('.date, .time, .published, .post-date, [class*="date"], [class*="time"]').first().text();
+    const dateFromText = this.parseDateMaybe(dateText);
+    if (dateFromText) return dateFromText;
+
+    return undefined;
+  }
+
+  private parseDateMaybe(value: string): Date | undefined {
+    const v = String(value || '').trim();
+    if (!v) return undefined;
+
+    // 1) Native parse (ISO / RFC)
+    const d = new Date(v);
+    if (!isNaN(d.getTime())) return d;
+
+    // 2) dd.mm.yyyy [hh:mm]
+    const m1 = v.match(/(\d{1,2})[.\-\/](\d{1,2})[.\-\/](20\d{2})(?:[,\s]+(\d{1,2}):(\d{2}))?/);
+    if (m1) {
+      const day = Number(m1[1]);
+      const month = Number(m1[2]);
+      const year = Number(m1[3]);
+      const hh = Number(m1[4] || 0);
+      const mm = Number(m1[5] || 0);
+      const dt = new Date(Date.UTC(year, month - 1, day, hh, mm));
+      if (!isNaN(dt.getTime())) return dt;
+    }
+
+    // 3) "сегодня" / "вчера" [hh:mm]
+    const lower = v.toLowerCase();
+    const m2 = lower.match(/\b(сегодня|вчера)\b(?:[,\s]+(\d{1,2}):(\d{2}))?/i);
+    if (m2) {
+      const base = new Date();
+      base.setHours(0, 0, 0, 0);
+      if (m2[1] === 'вчера') {
+        base.setDate(base.getDate() - 1);
+      }
+      const hh = Number(m2[2] || 0);
+      const mm = Number(m2[3] || 0);
+      const dt = new Date(base.getTime());
+      dt.setHours(hh, mm, 0, 0);
+      if (!isNaN(dt.getTime())) return dt;
+    }
+
+    // 4) Russian month names (genitive): "19 января 2026"
+    const months: Record<string, number> = {
+      'янв': 1, 'января': 1, 'январь': 1,
+      'фев': 2, 'февраля': 2, 'февраль': 2,
+      'мар': 3, 'марта': 3, 'март': 3,
+      'апр': 4, 'апреля': 4, 'апрель': 4,
+      'май': 5, 'мая': 5,
+      'июн': 6, 'июня': 6, 'июнь': 6,
+      'июл': 7, 'июля': 7, 'июль': 7,
+      'авг': 8, 'августа': 8, 'август': 8,
+      'сен': 9, 'сентября': 9, 'сентябрь': 9,
+      'окт': 10, 'октября': 10, 'октябрь': 10,
+      'ноя': 11, 'ноября': 11, 'ноябрь': 11,
+      'дек': 12, 'декабря': 12, 'декабрь': 12,
+    };
+    const m3 = lower.match(/(\d{1,2})\s+([а-яё]+)\s+(20\d{2})(?:[,\s]+(\d{1,2}):(\d{2}))?/i);
+    if (m3) {
+      const day = Number(m3[1]);
+      const monthName = String(m3[2] || '').slice(0, 9);
+      const month = months[monthName] || months[monthName.slice(0, 3)];
+      const year = Number(m3[3]);
+      const hh = Number(m3[4] || 0);
+      const mm = Number(m3[5] || 0);
+      if (month) {
+        const dt = new Date(Date.UTC(year, month - 1, day, hh, mm));
+        if (!isNaN(dt.getTime())) return dt;
+      }
+    }
+
+    // 5) "17 января, 1:07" (год не указан) — используем текущий год с поправкой на границу года
+    const m4 = lower.match(/(\d{1,2})\s+([а-яё]+)[,\s]+(\d{1,2}):(\d{2})/i);
+    if (m4) {
+      const day = Number(m4[1]);
+      const monthName = String(m4[2] || '').slice(0, 9);
+      const month = months[monthName] || months[monthName.slice(0, 3)];
+      const hh = Number(m4[3] || 0);
+      const mm = Number(m4[4] || 0);
+      if (month) {
+        const now = new Date();
+        const nowMonth = now.getMonth() + 1;
+        let year = now.getFullYear();
+        // если месяц "в будущем" (например, сейчас январь, а дата декабрь) — это прошлый год
+        if (month > nowMonth + 1) year -= 1;
+        const dt = new Date(Date.UTC(year, month - 1, day, hh, mm));
+        if (!isNaN(dt.getTime())) return dt;
+      }
+    }
+
+    return undefined;
+  }
+
+  private extractDateFromUrl(url: string): Date | undefined {
+    try {
+      const u = new URL(url);
+      const path = u.pathname;
+
+      // /YYYY/MM/DD/
+      const m1 = path.match(/\/(20\d{2})[\/\-](\d{1,2})[\/\-](\d{1,2})(?:\/|$)/);
+      if (m1) {
+        const y = Number(m1[1]);
+        const mo = Number(m1[2]);
+        const d = Number(m1[3]);
+        const dt = new Date(Date.UTC(y, mo - 1, d));
+        if (!isNaN(dt.getTime())) return dt;
+      }
+
+      // YYYYMMDD
+      const m2 = path.match(/(20\d{2})(\d{2})(\d{2})/);
+      if (m2) {
+        const y = Number(m2[1]);
+        const mo = Number(m2[2]);
+        const d = Number(m2[3]);
+        const dt = new Date(Date.UTC(y, mo - 1, d));
+        if (!isNaN(dt.getTime())) return dt;
+      }
+
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -338,6 +523,12 @@ export class WebsiteParser {
    */
   private async fetchHTML(url: string): Promise<string | null> {
     try {
+      const extraHeaders = this.config.headers || {};
+      const cookieHeader =
+        typeof this.config.cookies === 'string' && this.config.cookies.trim().length > 0
+          ? this.config.cookies.trim()
+          : undefined;
+
       const response = await axios.get(url, {
         headers: {
           'User-Agent': this.config.userAgent!,
@@ -345,6 +536,8 @@ export class WebsiteParser {
           'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
           'Accept-Encoding': 'gzip, deflate, br',
           'Cache-Control': 'no-cache',
+          ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+          ...extraHeaders,
         },
         timeout: this.config.timeout,
         maxRedirects: 5,

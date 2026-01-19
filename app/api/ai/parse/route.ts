@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
 
     // Парсим body
     const body = await request.json();
-    const { channel_id } = body;
+    const { channel_id, parse_mode } = body;
 
     if (!channel_id) {
       return NextResponse.json(
@@ -31,7 +31,8 @@ export async function POST(request: NextRequest) {
     const processor = createAIProcessor();
 
     // Запускаем обработку канала
-    const result = await processor.processChannel(channel_id);
+    const parseMode: 'new' | 'old' | undefined = parse_mode === 'old' ? 'old' : parse_mode === 'new' ? 'new' : undefined;
+    const result = await processor.processChannel(channel_id, { parseMode });
 
     return NextResponse.json({
       success: result.success,

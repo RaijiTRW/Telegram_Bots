@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 
 interface AIModalProps {
-  selection: { text: string; from: number; to: number } | null;
+  selection: { text: string; from: number; to: number; coords?: { top: number; left: number } } | null;
   onApply: (instruction: string) => void;
   isLoading?: boolean;
   error?: string | null;
@@ -17,14 +17,20 @@ export function AIModal({ selection, onApply, isLoading = false, error = null }:
 
   useEffect(() => {
     if (selection) {
+      if (selection.coords) {
+        setPosition(selection.coords);
+        return;
+      }
+
+      // Fallback for older selection payloads
       const domSelection = window.getSelection();
       if (domSelection && domSelection.rangeCount > 0) {
         const range = domSelection.getRangeAt(0);
         const rect = range.getBoundingClientRect();
 
         setPosition({
-          top: rect.bottom + window.scrollY + 12,
-          left: Math.max(20, rect.left + window.scrollX - 50),
+          top: rect.bottom + 12,
+          left: Math.max(20, rect.left - 50),
         });
       }
     } else {
@@ -33,12 +39,8 @@ export function AIModal({ selection, onApply, isLoading = false, error = null }:
     }
   }, [selection]);
 
-  // Автофокус на input
-  useEffect(() => {
-    if (position && inputRef.current) {
-      inputRef.current.focus();
-    }
-  }, [position]);
+  // Важно: не автофокусим input, иначе браузер снимает выделение в редакторе
+  // и пользователю кажется, что выделение "сбрасывается".
 
   // Закрытие при клике вне модалки
   useEffect(() => {

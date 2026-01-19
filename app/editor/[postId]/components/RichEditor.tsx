@@ -4,17 +4,30 @@ import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Placeholder from '@tiptap/extension-placeholder';
 import { EditorToolbar } from './EditorToolbar';
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 
 interface RichEditorProps {
   content: any;
   onChange: (content: any, plainText: string) => void;
-  onTextSelect: (selection: { text: string; from: number; to: number } | null) => void;
+  onTextSelect: (selection: { text: string; from: number; to: number; coords?: { top: number; left: number } } | null) => void;
 }
 
 export function RichEditor({ content, onChange, onTextSelect }: RichEditorProps) {
   const [isMounted, setIsMounted] = useState(false);
   const selectionTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const extensions = useMemo(() => [
+    StarterKit,
+    Placeholder.configure({
+      placeholder: 'Начните писать ваш пост...',
+    }),
+  ], []);
+
+  const editorProps = useMemo(() => ({
+    attributes: {
+      class: 'prose prose-invert max-w-none focus:outline-none min-h-[400px] p-4',
+    },
+  }), []);
 
   // Debounced selection handler - ждёт 500ms после завершения выделения
   const handleSelectionUpdate = useCallback(({ editor }: { editor: any }) => {
@@ -26,35 +39,36 @@ export function RichEditor({ content, onChange, onTextSelect }: RichEditorProps)
     const { from, to } = editor.state.selection;
     const text = editor.state.doc.textBetween(from, to, ' ');
 
-    // Минимум 5 символов для показа модалки
-    if (text.trim().length >= 5 && from !== to) {
+    // Показываем модалку для любого непустого выделения
+    if (text.trim().length >= 1 && from !== to) {
       // Задержка 500ms перед показом модалки
       selectionTimeoutRef.current = setTimeout(() => {
-        onTextSelect({ text, from, to });
+        let coords: { top: number; left: number } | undefined;
+        try {
+          const box = editor.view.coordsAtPos(to);
+          coords = { top: box.bottom + 12, left: Math.max(20, box.left - 50) };
+        } catch {
+          coords = undefined;
+        }
+
+        onTextSelect({ text, from, to, coords });
       }, 500);
     } else {
       onTextSelect(null);
     }
   }, [onTextSelect]);
 
+  const handleUpdate = useCallback(({ editor }: { editor: any }) => {
+    const json = editor.getJSON();
+    const text = editor.getText();
+    onChange(json, text);
+  }, [onChange]);
+
   const editor = useEditor({
-    extensions: [
-      StarterKit,
-      Placeholder.configure({
-        placeholder: 'Начните писать ваш пост...',
-      }),
-    ],
+    extensions,
     content,
-    editorProps: {
-      attributes: {
-        class: 'prose prose-invert max-w-none focus:outline-none min-h-[400px] p-4',
-      },
-    },
-    onUpdate: ({ editor }) => {
-      const json = editor.getJSON();
-      const text = editor.getText();
-      onChange(json, text);
-    },
+    editorProps,
+    onUpdate: handleUpdate,
     onSelectionUpdate: handleSelectionUpdate,
   });
 
