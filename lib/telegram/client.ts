@@ -6,147 +6,251 @@ import { supabaseAdmin } from '@/lib/supabase/server';
 const apiId = parseInt(process.env.TELEGRAM_API_ID || '0', 10);
 const apiHash = process.env.TELEGRAM_API_HASH || '';
 
-// Singleton для клиента
-let clientInstance: TelegramClient | null = null;
-let isConnecting = false;
+const CONNECT_TIMEOUT_MS = 25_000;
+const AUTH_TIMEOUT_MS = 25_000;
 
-/**
- * Получить активную сессию из БД
- */
-async function getActiveSession(): Promise<string | null> {
+type ClientState = {
+  client: TelegramClient | null;
+  isConnecting: boolean;
+  sessionString: string | null;
+};
+
+const clientStates = new Map<string, ClientState>();
+
+function stateKey(userId?: string | null): string {
+  return userId ? `user:${userId}` : 'global';
+}
+
+function getState(userId?: string | null): ClientState {
+  const key = stateKey(userId);
+  let st = clientStates.get(key);
+  if (!st) {
+    st = { client: null, isConnecting: false, sessionString: null };
+    clientStates.set(key, st);
+  }
+  return st;
+}
+
+function timeoutError(label: string, ms: number): Error {
+  return new Error(`${label} timeout after ${ms}ms`);
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timeoutId: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeoutId = setTimeout(() => reject(timeoutError(label, ms)), ms);
+  });
+
   try {
-    const { data, error } = await (supabaseAdmin
-      .from('telegram_sessions') as any)
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+async function getActiveSession(userId?: string | null): Promise<string | null> {
+  try {
+    let query = (supabaseAdmin.from('telegram_sessions') as any)
       .select('session_string')
       .eq('is_active', true)
       .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
+      .limit(1);
+
+    if (userId) {
+      query = query.eq('user_id', userId);
+    }
+
+    const { data, error } = await query.single();
+
+    if (error) {
+      const msg = String(error.message || error);
+      // Backward-compatible: migration with telegram_sessions.user_id may not be applied yet.
+      if (userId && msg.toLowerCase().includes('user_id') && msg.toLowerCase().includes('column')) {
+        return await getActiveSession(null);
+      }
+    }
 
     if (error || !data) {
-      return process.env.TELEGRAM_SESSION || null;
+      return userId ? null : (process.env.TELEGRAM_SESSION || null);
     }
 
     return data.session_string;
   } catch {
-    return process.env.TELEGRAM_SESSION || null;
+    // Backward-compatible: if user_id column doesn't exist, fall back to global session.
+    if (userId) {
+      try {
+        return await getActiveSession(null);
+      } catch {
+        // ignore
+      }
+    }
+    return userId ? null : (process.env.TELEGRAM_SESSION || null);
   }
 }
 
-/**
- * Сохранить сессию в БД
- */
-export async function saveSession(sessionString: string, phoneNumber?: string): Promise<void> {
-  // Деактивировать старые сессии
-  await (supabaseAdmin
-    .from('telegram_sessions') as any)
+export async function saveSession(
+  sessionString: string,
+  phoneNumber: string | undefined,
+  userId: string
+): Promise<void> {
+  // Preferred: per-user sessions
+  const { error: deactivateError } = await (supabaseAdmin.from('telegram_sessions') as any)
     .update({ is_active: false })
-    .eq('is_active', true);
+    .eq('is_active', true)
+    .eq('user_id', userId);
 
-  // Создать новую сессию
-  await (supabaseAdmin
-    .from('telegram_sessions') as any)
-    .insert({
-      session_string: sessionString,
-      phone_number: phoneNumber,
-      is_active: true,
-    });
+  if (deactivateError) {
+    const msg = String(deactivateError.message || deactivateError);
+    if (msg.toLowerCase().includes('user_id') && msg.toLowerCase().includes('column')) {
+      // Backward-compatible: old schema without user_id (global session)
+      await (supabaseAdmin.from('telegram_sessions') as any)
+        .update({ is_active: false })
+        .eq('is_active', true);
+
+      await (supabaseAdmin.from('telegram_sessions') as any).insert({
+        session_string: sessionString,
+        phone_number: phoneNumber,
+        is_active: true,
+      });
+      return;
+    }
+    throw deactivateError;
+  }
+
+  const { error: insertError } = await (supabaseAdmin.from('telegram_sessions') as any).insert({
+    session_string: sessionString,
+    phone_number: phoneNumber,
+    user_id: userId,
+    is_active: true,
+  });
+
+  if (insertError) {
+    const msg = String(insertError.message || insertError);
+    if (msg.toLowerCase().includes('user_id') && msg.toLowerCase().includes('column')) {
+      await (supabaseAdmin.from('telegram_sessions') as any).insert({
+        session_string: sessionString,
+        phone_number: phoneNumber,
+        is_active: true,
+      });
+      return;
+    }
+    throw insertError;
+  }
 }
 
-/**
- * Получить или создать Telegram клиент
- */
-export async function getTelegramClient(): Promise<TelegramClient> {
+export async function getTelegramClient(userId?: string): Promise<TelegramClient> {
   if (!apiId || !apiHash) {
     throw new Error('TELEGRAM_API_ID и TELEGRAM_API_HASH не настроены');
   }
 
-  // Вернуть существующий клиент если он подключен
-  if (clientInstance?.connected) {
-    return clientInstance;
-  }
+  const st = getState(userId);
+  const activeSessionString = await getActiveSession(userId);
 
-  // Предотвращение параллельных подключений
-  if (isConnecting) {
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    if (clientInstance?.connected) {
-      return clientInstance;
+  if (st.client?.connected) {
+    if (st.sessionString && activeSessionString && st.sessionString !== activeSessionString) {
+      try {
+        await st.client.disconnect();
+      } catch {
+        // ignore
+      }
+      st.client = null;
+    } else {
+      return st.client;
     }
   }
 
-  isConnecting = true;
+  if (st.isConnecting) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    if (st.client?.connected) return st.client;
+  }
+
+  st.isConnecting = true;
 
   try {
-    // Загрузить сессию из БД
-    const sessionString = await getActiveSession();
-    const session = new StringSession(sessionString || '');
-
-    // Создать клиент
-    clientInstance = new TelegramClient(session, apiId, apiHash, {
+    const session = new StringSession(activeSessionString || '');
+    st.client = new TelegramClient(session, apiId, apiHash, {
       connectionRetries: 5,
       useWSS: true,
     });
 
-    // Подключиться
-    await clientInstance.connect();
+    try {
+      await withTimeout(st.client.connect(), CONNECT_TIMEOUT_MS, 'Telegram connect');
+    } catch (e) {
+      try {
+        await st.client.disconnect();
+      } catch {
+        // ignore
+      }
+      st.client = null;
+      throw e;
+    }
+    st.sessionString = activeSessionString || null;
 
-    return clientInstance;
+    return st.client;
   } finally {
-    isConnecting = false;
+    st.isConnecting = false;
   }
 }
 
-/**
- * Проверить авторизован ли клиент
- */
-export async function isAuthorized(): Promise<boolean> {
+export async function isAuthorized(userId?: string): Promise<boolean> {
   try {
-    const client = await getTelegramClient();
+    const client = await getTelegramClient(userId);
     return await client.isUserAuthorized();
   } catch {
     return false;
   }
 }
 
-/**
- * Отключить клиент
- */
-export async function disconnectClient(): Promise<void> {
-  if (clientInstance) {
-    await clientInstance.disconnect();
-    clientInstance = null;
+export async function disconnectClient(userId?: string): Promise<void> {
+  const st = getState(userId);
+  if (st.client) {
+    await st.client.disconnect();
+    st.client = null;
   }
 }
 
-/**
- * Начать процесс авторизации - отправить код
- */
-export async function sendAuthCode(phoneNumber: string): Promise<{ phoneCodeHash: string }> {
-  const client = await getTelegramClient();
+export async function sendAuthCode(
+  phoneNumber: string,
+  userId: string
+): Promise<{ phoneCodeHash: string }> {
+  const client = await getTelegramClient(userId);
 
-  const result = await client.sendCode(
-    {
-      apiId,
-      apiHash,
-    },
-    phoneNumber
-  );
+  let result: { phoneCodeHash: string };
+  try {
+    result = await withTimeout(
+      client.sendCode(
+        {
+          apiId,
+          apiHash,
+        },
+        phoneNumber
+      ),
+      AUTH_TIMEOUT_MS,
+      'Telegram sendCode'
+    );
+  } catch (e) {
+    // Reset stuck client so next attempt can retry cleanly
+    try {
+      await disconnectClient(userId);
+    } catch {
+      // ignore
+    }
+    throw e;
+  }
 
   return {
     phoneCodeHash: result.phoneCodeHash,
   };
 }
 
-/**
- * Подтвердить код авторизации
- */
 export async function verifyAuthCode(
   phoneNumber: string,
   phoneCode: string,
   phoneCodeHash: string,
-  password?: string
+  password: string | undefined,
+  userId: string
 ): Promise<{ success: boolean; needPassword?: boolean }> {
-  const client = await getTelegramClient();
+  const client = await getTelegramClient(userId);
 
   try {
     await client.invoke(
@@ -157,13 +261,11 @@ export async function verifyAuthCode(
       })
     );
 
-    // Сохранить сессию
     const sessionString = (client.session as StringSession).save();
-    await saveSession(sessionString, phoneNumber);
+    await saveSession(sessionString, phoneNumber, userId);
 
     return { success: true };
   } catch (error: any) {
-    // Требуется 2FA пароль
     if (error.errorMessage === 'SESSION_PASSWORD_NEEDED') {
       if (password) {
         await client.signInWithPassword(
@@ -180,7 +282,7 @@ export async function verifyAuthCode(
         );
 
         const sessionString = (client.session as StringSession).save();
-        await saveSession(sessionString, phoneNumber);
+        await saveSession(sessionString, phoneNumber, userId);
 
         return { success: true };
       }
@@ -192,25 +294,53 @@ export async function verifyAuthCode(
   }
 }
 
-/**
- * Получить статус подключения
- */
+export async function getConnectionStatusForUser(userId: string): Promise<{
+  connected: boolean;
+  authorized: boolean;
+  phoneNumber?: string;
+}> {
+  try {
+    const { data: session } = await (supabaseAdmin.from('telegram_sessions') as any)
+      .select('phone_number')
+      .eq('is_active', true)
+      .eq('user_id', userId)
+      .single();
+
+    const authorized = await isAuthorized(userId);
+    const st = getState(userId);
+
+    return {
+      connected: !!st.client?.connected,
+      authorized,
+      phoneNumber: session?.phone_number,
+    };
+  } catch {
+    return {
+      connected: false,
+      authorized: false,
+    };
+  }
+}
+
+// Backward-compatible: legacy callers without userId
 export async function getConnectionStatus(): Promise<{
   connected: boolean;
   authorized: boolean;
   phoneNumber?: string;
 }> {
   try {
-    const { data: session } = await (supabaseAdmin
-      .from('telegram_sessions') as any)
+    const { data: session } = await (supabaseAdmin.from('telegram_sessions') as any)
       .select('phone_number')
       .eq('is_active', true)
+      .order('created_at', { ascending: false })
+      .limit(1)
       .single();
 
     const authorized = await isAuthorized();
+    const st = getState(null);
 
     return {
-      connected: !!clientInstance?.connected,
+      connected: !!st.client?.connected,
       authorized,
       phoneNumber: session?.phone_number,
     };

@@ -45,15 +45,15 @@ interface TelegramPostAnalyticsRow {
 /**
  * Получить статистику канала через TDLib
  */
-export async function getChannelStats(channelUsername: string): Promise<ChannelStats | null> {
-  const authorized = await isAuthorized();
+export async function getChannelStats(channelUsername: string, userId?: string): Promise<ChannelStats | null> {
+  const authorized = await isAuthorized(userId);
   if (!authorized) {
     console.log('Telegram не авторизован');
     return null;
   }
 
   try {
-    const client = await getTelegramClient();
+    const client = await getTelegramClient(userId);
 
     // Получить entity канала
     const channel = await client.getEntity(normalizeChannelRef(channelUsername));
@@ -86,16 +86,17 @@ export async function getChannelStats(channelUsername: string): Promise<ChannelS
  */
 export async function getPostStats(
   channelUsername: string,
-  messageId: number
+  messageId: number,
+  userId?: string
 ): Promise<PostStats | null> {
-  const authorized = await isAuthorized();
+  const authorized = await isAuthorized(userId);
   if (!authorized) {
     console.log('Telegram не авторизован');
     return null;
   }
 
   try {
-    const client = await getTelegramClient();
+    const client = await getTelegramClient(userId);
 
     // Получить entity канала
     const channel = await client.getEntity(normalizeChannelRef(channelUsername));
@@ -136,14 +137,14 @@ export async function getPostStats(
 /**
  * Получить количество подписчиков канала
  */
-export async function getSubscribersCount(channelUsername: string): Promise<number | null> {
-  const authorized = await isAuthorized();
+export async function getSubscribersCount(channelUsername: string, userId?: string): Promise<number | null> {
+  const authorized = await isAuthorized(userId);
   if (!authorized) {
     return null;
   }
 
   try {
-    const client = await getTelegramClient();
+    const client = await getTelegramClient(userId);
     const channel = await client.getEntity(normalizeChannelRef(channelUsername));
 
     const fullChannel = await client.invoke(
@@ -162,7 +163,7 @@ export async function getSubscribersCount(channelUsername: string): Promise<numb
 /**
  * Синхронизировать статистику всех каналов
  */
-export async function syncAllChannelsStats(): Promise<{
+export async function syncAllChannelsStats(userId?: string): Promise<{
   synced: number;
   failed: number;
   errors: string[];
@@ -171,7 +172,7 @@ export async function syncAllChannelsStats(): Promise<{
   telegramPostsSynced: number;
   telegramPostsFailed: number;
 }> {
-  const authorized = await isAuthorized();
+  const authorized = await isAuthorized(userId);
   if (!authorized) {
     return {
       synced: 0,
@@ -201,7 +202,7 @@ export async function syncAllChannelsStats(): Promise<{
     };
   }
 
-  const client = await getTelegramClient();
+  const client = await getTelegramClient(userId);
   let synced = 0;
   let failed = 0;
   let postsSynced = 0;
@@ -265,7 +266,7 @@ export async function syncAllChannelsStats(): Promise<{
       }
 
       // 2) Синхронизация постов канала напрямую из Telegram (для просмотров/реакций)
-      const tgSync = await syncTelegramChannelPosts(channel.id, channel.telegram_chat_id);
+      const tgSync = await syncTelegramChannelPosts(userId, channel.id, channel.telegram_chat_id);
       telegramPostsSynced += tgSync.synced;
       telegramPostsFailed += tgSync.failed;
       if (tgSync.errors.length > 0) {
@@ -273,7 +274,7 @@ export async function syncAllChannelsStats(): Promise<{
       }
 
       // 3) Синхронизация статистики постов приложения (если есть telegram_message_id)
-      const postSync = await syncChannelPostsAnalytics(channel.id, channel.telegram_chat_id);
+      const postSync = await syncChannelPostsAnalytics(userId, channel.id, channel.telegram_chat_id);
       postsSynced += postSync.synced;
       postsFailed += postSync.failed;
       if (postSync.errors.length > 0) {
@@ -298,15 +299,16 @@ export async function syncAllChannelsStats(): Promise<{
 }
 
 async function syncTelegramChannelPosts(
+  userId: string | undefined,
   channelId: string,
   channelIdentifier: string,
   limit: number = 50
 ): Promise<{ synced: number; failed: number; errors: string[] }> {
-  const authorized = await isAuthorized();
+  const authorized = await isAuthorized(userId);
   if (!authorized) return { synced: 0, failed: 0, errors: ['Telegram не авторизован'] };
 
   try {
-    const client = await getTelegramClient();
+    const client = await getTelegramClient(userId);
     const entity = await client.getEntity(normalizeChannelRef(channelIdentifier));
     const messages: any[] = await client.getMessages(entity, { limit });
 
@@ -353,6 +355,7 @@ async function syncTelegramChannelPosts(
 }
 
 async function syncChannelPostsAnalytics(
+  userId: string | undefined,
   channelId: string,
   channelIdentifier: string
 ): Promise<{ synced: number; failed: number; errors: string[] }> {
@@ -360,12 +363,12 @@ async function syncChannelPostsAnalytics(
   let synced = 0;
   let failed = 0;
 
-  const authorized = await isAuthorized();
+  const authorized = await isAuthorized(userId);
   if (!authorized) {
     return { synced: 0, failed: 0, errors: ['Telegram не авторизован'] };
   }
 
-  const client = await getTelegramClient();
+  const client = await getTelegramClient(userId);
   const channelEntity = await client.getEntity(normalizeChannelRef(channelIdentifier));
 
   // Берем только относительно свежие посты, чтобы не гонять сотни запросов
@@ -507,13 +510,14 @@ async function savePostAnalytics(
 
 async function getPostStatsByMessage(
   channelIdentifier: string,
-  messageId: number
+  messageId: number,
+  userId?: string
 ): Promise<(PostStats & { reactionsBreakdown: ReactionBreakdownItem[] }) | null> {
-  const authorized = await isAuthorized();
+  const authorized = await isAuthorized(userId);
   if (!authorized) return null;
 
   try {
-    const client = await getTelegramClient();
+    const client = await getTelegramClient(userId);
     const channel = await client.getEntity(normalizeChannelRef(channelIdentifier));
     return await getPostStatsByMessageWithClient(client, channel as any, messageId);
   } catch (error) {
@@ -928,6 +932,7 @@ export async function getChannelStatsFromDB(
  * Получить общую статистику всех каналов
  */
 export async function getAllChannelsStats(
+  _userId: string,
   startDate: string,
   endDate: string
 ): Promise<{
@@ -1031,10 +1036,11 @@ export async function getAllChannelsStats(
 }
 
 export async function syncPostsAnalyticsByPostIds(
+  userId: string,
   postIds: string[],
   limit: number = 20
 ): Promise<{ synced: number; failed: number; errors: string[] }> {
-  const authorized = await isAuthorized();
+  const authorized = await isAuthorized(userId);
   if (!authorized) {
     return { synced: 0, failed: 0, errors: ['Telegram не авторизован'] };
   }
@@ -1083,7 +1089,7 @@ export async function syncPostsAnalyticsByPostIds(
         continue;
       }
 
-      const stats = await getPostStatsByMessage(channelRef, messageId);
+      const stats = await getPostStatsByMessage(channelRef, messageId, userId);
       if (!stats) {
         failed++;
         continue;

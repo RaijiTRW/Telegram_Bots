@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { getConnectionStatus } from '@/lib/telegram/client';
+import { getConnectionStatusForUser } from '@/lib/telegram/client';
 
 export async function GET(request: NextRequest) {
   try {
@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const status = await getConnectionStatus();
+    const status = await getConnectionStatusForUser(userId);
 
     return NextResponse.json({
       connected: status.connected,

@@ -35,6 +35,7 @@ export interface TelegramParserConfig {
 type TelegramResolveOptions = {
   allowJoinViaInvite?: boolean;
   direction?: 'new' | 'old';
+  telegramUserId?: string;
 };
 
 // ============================================================================
@@ -44,6 +45,7 @@ type TelegramResolveOptions = {
 export class TelegramParser {
   private apiId: number;
   private apiHash: string;
+  private telegramUserId?: string;
 
   constructor(config: TelegramParserConfig) {
     this.apiId = config.apiId;
@@ -58,14 +60,14 @@ export class TelegramParser {
    * Получение или создание клиента
    */
   private async getClient(): Promise<TelegramClient> {
-    const authorized = await isTelegramAuthorized();
+    const authorized = await isTelegramAuthorized(this.telegramUserId);
     if (!authorized) {
       throw new Error(
         'Telegram аккаунт (User API) не подключен или не авторизован. Подключите его в разделе «Настройки Telegram».'
       );
     }
 
-    return await getTelegramClient();
+    return await getTelegramClient(this.telegramUserId);
   }
 
   /**
@@ -81,6 +83,7 @@ export class TelegramParser {
     options?: TelegramResolveOptions
   ): Promise<{ results: TelegramParseResult[]; lastMessageId: number | null }> {
     try {
+      this.telegramUserId = options?.telegramUserId;
       const client = await this.getClient();
       let ref = this.extractTelegramRef(channelUrl);
       if (ref.type === 'username' && ref.value.startsWith('+') && ref.value.length > 1) {

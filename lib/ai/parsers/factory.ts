@@ -28,6 +28,7 @@ export interface ParseOptions {
   lastPublishedDate?: Date;
   lastMessageId?: number;
   parseMode?: 'new' | 'old';
+  telegramUserId?: string;
 }
 
 export interface ParseResponse {
@@ -105,7 +106,7 @@ export class ParserFactory {
       source.url,
       cursorMessageId,
       options?.maxItems || 20,
-      { allowJoinViaInvite, direction: parseMode }
+      { allowJoinViaInvite, direction: parseMode, telegramUserId: options?.telegramUserId }
     );
 
     return {

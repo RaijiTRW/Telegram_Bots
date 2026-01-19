@@ -46,15 +46,16 @@ export async function GET(request: NextRequest) {
 
     let syncInfo: any = null;
     if (sync) {
-      const authorized = await isAuthorized();
+      const authorized = await isAuthorized(userId);
       if (authorized) {
-        syncInfo = await syncAllChannelsStats();
+        syncInfo = await syncAllChannelsStats(userId);
       } else {
         syncInfo = { synced: 0, failed: 0, errors: ['Telegram не подключен'] };
       }
     }
 
     const stats = await getAllChannelsStats(
+      userId,
       startDate.toISOString().split('T')[0],
       endDate.toISOString().split('T')[0]
     );

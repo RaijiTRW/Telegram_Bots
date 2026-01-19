@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { Sidebar } from '@/components/layout/Sidebar';
 
 type AuthStep = 'phone' | 'code' | 'password' | 'connected';
+const REQUEST_TIMEOUT_MS = 30_000;
 
 export default function TelegramSettingsPage() {
   const [step, setStep] = useState<AuthStep>('phone');
@@ -38,11 +39,16 @@ export default function TelegramSettingsPage() {
     setError(null);
 
     try {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
       const response = await fetch('/api/telegram/auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phoneNumber }),
+        signal: controller.signal,
       });
+      clearTimeout(id);
 
       const data = await response.json();
 
@@ -53,7 +59,11 @@ export default function TelegramSettingsPage() {
       setPhoneCodeHash(data.phoneCodeHash);
       setStep('code');
     } catch (err: any) {
-      setError(err.message);
+      const msg =
+        err?.name === 'AbortError'
+          ? 'Telegram не отвечает. Попробуйте ещё раз через 10–20 секунд.'
+          : err?.message;
+      setError(msg);
     } finally {
       setIsLoading(false);
     }
@@ -64,6 +74,9 @@ export default function TelegramSettingsPage() {
     setError(null);
 
     try {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
       const response = await fetch('/api/telegram/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -73,7 +86,9 @@ export default function TelegramSettingsPage() {
           phoneCodeHash,
           password: password || undefined,
         }),
+        signal: controller.signal,
       });
+      clearTimeout(id);
 
       const data = await response.json();
 
@@ -89,7 +104,11 @@ export default function TelegramSettingsPage() {
       setStep('connected');
       setConnectedPhone(phoneNumber);
     } catch (err: any) {
-      setError(err.message);
+      const msg =
+        err?.name === 'AbortError'
+          ? 'Telegram не отвечает. Попробуйте ещё раз через 10–20 секунд.'
+          : err?.message;
+      setError(msg);
     } finally {
       setIsLoading(false);
     }

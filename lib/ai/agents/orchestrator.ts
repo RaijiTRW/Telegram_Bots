@@ -107,7 +107,7 @@ export class Orchestrator {
    */
   async processChannel(
     channel: Channel,
-    options?: { parseMode?: 'new' | 'old' }
+    options?: { parseMode?: 'new' | 'old'; telegramUserId?: string }
   ): Promise<OrchestratorResult> {
     this.log(`Processing channel: ${channel.name}`);
 
@@ -148,6 +148,7 @@ export class Orchestrator {
         channelId: channel.id,
         sources,
         parseMode: options?.parseMode,
+        telegramUserId: options?.telegramUserId,
       });
 
       if (!parserResult.success || !parserResult.data) {

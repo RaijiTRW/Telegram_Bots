@@ -48,7 +48,7 @@ export class AIProcessor {
    */
   async processChannel(
     channelId: string,
-    options?: { parseMode?: 'new' | 'old' }
+    options?: { parseMode?: 'new' | 'old'; telegramUserId?: string }
   ): Promise<ProcessorResult> {
     console.log(`[AIProcessor] Processing single channel ${channelId} via Orchestrator...`);
 

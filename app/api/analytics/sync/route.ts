@@ -16,7 +16,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Проверить что Telegram подключен
-    const authorized = await isAuthorized();
+    const authorized = await isAuthorized(userId);
     if (!authorized) {
       return NextResponse.json(
         { error: 'Telegram не подключен. Перейдите в настройки для авторизации.' },
@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Синхронизировать статистику
-    const result = await syncAllChannelsStats();
+    const result = await syncAllChannelsStats(userId);
 
     return NextResponse.json({
       success: true,

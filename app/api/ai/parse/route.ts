@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
 
     // Запускаем обработку канала
     const parseMode: 'new' | 'old' | undefined = parse_mode === 'old' ? 'old' : parse_mode === 'new' ? 'new' : undefined;
-    const result = await processor.processChannel(channel_id, { parseMode });
+    const result = await processor.processChannel(channel_id, { parseMode, telegramUserId: userId });
 
     return NextResponse.json({
       success: result.success,

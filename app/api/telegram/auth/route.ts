@@ -2,6 +2,19 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { sendAuthCode } from '@/lib/telegram/client';
 
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timeoutId: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error('Telegram timeout')), ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const cookieStore = await cookies();
@@ -34,7 +47,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Отправить код авторизации
-    const result = await sendAuthCode(cleanPhone);
+    const result = await withTimeout(sendAuthCode(cleanPhone, userId), 30_000);
 
     return NextResponse.json({
       success: true,
@@ -78,6 +91,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: 'Неверный TELEGRAM_API_ID. Проверьте настройки в .env.local' },
         { status: 500 }
+      );
+    }
+
+    if (String(error?.message || '').toLowerCase().includes('timeout')) {
+      return NextResponse.json(
+        { error: 'Telegram не отвечает. Попробуйте ещё раз через 10–20 секунд.' },
+        { status: 504 }
       );
     }
 

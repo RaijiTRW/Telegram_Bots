@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import clsx from 'clsx';
+import { useEffect, useMemo, useState } from 'react';
 
 interface NavItem {
   href: string;
@@ -76,6 +77,37 @@ const navigation: NavItem[] = [
 
 export function Sidebar({ user }: SidebarProps) {
   const pathname = usePathname();
+  const [resolvedUser, setResolvedUser] = useState<SidebarProps['user']>(user);
+
+  const fallbackUser = useMemo(() => {
+    const email = resolvedUser?.email || user?.email;
+    return email ? { email } : undefined;
+  }, [resolvedUser, user?.email]);
+
+  useEffect(() => {
+    // If parent already passed the user, prefer it.
+    if (user?.email) {
+      setResolvedUser(user);
+      return;
+    }
+
+    const controller = new AbortController();
+    (async () => {
+      try {
+        const resp = await fetch('/api/auth/me', { cache: 'no-store', signal: controller.signal });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const email = data?.user?.email;
+        if (typeof email === 'string' && email.length > 0) {
+          setResolvedUser({ email });
+        }
+      } catch {
+        // ignore
+      }
+    })();
+
+    return () => controller.abort();
+  }, [user?.email]);
 
   return (
     <aside style={{
@@ -200,7 +232,7 @@ export function Sidebar({ user }: SidebarProps) {
             fontWeight: '700',
             fontSize: '16px'
           }}>
-            {user?.email?.charAt(0).toUpperCase() || 'A'}
+            {fallbackUser?.email?.charAt(0).toUpperCase() || 'A'}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <p style={{
@@ -211,7 +243,7 @@ export function Sidebar({ user }: SidebarProps) {
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap'
             }}>
-              {user?.email?.split('@')[0] || 'Admin'}
+              {fallbackUser?.email?.split('@')[0] || 'Admin'}
             </p>
             <p style={{
               fontSize: '12px',
@@ -221,7 +253,7 @@ export function Sidebar({ user }: SidebarProps) {
               whiteSpace: 'nowrap',
               marginTop: '2px'
             }}>
-              {user?.email || 'admin@example.com'}
+              {fallbackUser?.email || 'admin@example.com'}
             </p>
           </div>
           <button

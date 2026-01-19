@@ -29,7 +29,8 @@ export async function POST(request: NextRequest) {
       phoneNumber,
       phoneCode,
       phoneCodeHash,
-      password
+      password,
+      userId
     );
 
     if (result.needPassword) {

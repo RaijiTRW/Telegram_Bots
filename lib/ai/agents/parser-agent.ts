@@ -11,6 +11,7 @@ export interface ParserInput {
   channelId: string;
   sources: Source[];
   parseMode?: 'new' | 'old';
+  telegramUserId?: string;
 }
 
 export interface ParsedImage {
@@ -75,6 +76,7 @@ export class ParserAgent extends BaseAgent {
           const { results, lastMessageId } = await parserFactory.parseSource(source, {
             maxItems: 10,
             parseMode: input.parseMode,
+            telegramUserId: input.telegramUserId,
           });
 
           this.log(`Got ${results.length} results from ${source.url}`);

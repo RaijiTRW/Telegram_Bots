@@ -68,9 +68,9 @@ export async function GET(request: NextRequest) {
 
     let syncInfo: any = null;
     if (sync && postIds.length > 0) {
-      const authorized = await isAuthorized();
+      const authorized = await isAuthorized(userId);
       if (authorized) {
-        syncInfo = await syncPostsAnalyticsByPostIds(postIds, syncLimit);
+        syncInfo = await syncPostsAnalyticsByPostIds(userId, postIds, syncLimit);
       } else {
         syncInfo = { synced: 0, failed: 0, errors: ['Telegram не авторизован'] };
       }
