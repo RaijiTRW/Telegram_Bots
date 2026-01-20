@@ -24,10 +24,10 @@ export default async function ChannelsPage() {
       <Sidebar user={userData ? { email: userData.email } : undefined} />
 
       {/* Main Content Area */}
-      <main style={{ marginLeft: '288px' }} className="flex-1">
+      <main style={{ marginLeft: 'var(--sidebar-offset)' }} className="flex-1">
         {/* Page Header */}
         <div style={{
-          padding: '48px 64px',
+          padding: 'var(--page-padding-y) var(--page-padding-x)',
           borderBottom: '1px solid var(--border)',
           backgroundColor: 'var(--background)'
         }}>
@@ -39,7 +39,7 @@ export default async function ChannelsPage() {
           }}>
             <div>
               <h1 style={{
-                fontSize: '42px',
+                fontSize: 'clamp(28px, 4vw, 42px)',
                 fontWeight: '700',
                 color: 'var(--foreground)',
                 marginBottom: '16px',
@@ -59,7 +59,7 @@ export default async function ChannelsPage() {
         </div>
 
         {/* Content */}
-        <div style={{ padding: '64px' }}>
+        <div style={{ padding: 'var(--content-padding)' }}>
           <ChannelsList />
         </div>
       </main>

@@ -7,6 +7,39 @@ import { isAuthorized } from '@/lib/telegram/client';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
+function toUtcDateString(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function getPeriodRangeUtc(period: string): { startDate: Date; endDate: Date; startDay: string; endDay: string } {
+  const endDate = new Date();
+  const startDate = new Date(endDate);
+  startDate.setUTCHours(0, 0, 0, 0);
+
+  switch (period) {
+    case 'today':
+      break;
+    case 'week':
+      startDate.setUTCDate(startDate.getUTCDate() - 6);
+      break;
+    case 'month':
+      startDate.setUTCMonth(startDate.getUTCMonth() - 1);
+      break;
+    case 'year':
+      startDate.setUTCFullYear(startDate.getUTCFullYear() - 1);
+      break;
+    default:
+      startDate.setUTCDate(startDate.getUTCDate() - 6);
+  }
+
+  return {
+    startDate,
+    endDate,
+    startDay: toUtcDateString(startDate),
+    endDay: toUtcDateString(endDate),
+  };
+}
+
 export async function GET(request: NextRequest) {
   try {
     const cookieStore = await cookies();
@@ -25,28 +58,9 @@ export async function GET(request: NextRequest) {
     const syncLimit = Math.max(1, Math.min(50, parseInt(searchParams.get('syncLimit') || '20', 10) || 20));
     const limit = Math.max(1, Math.min(200, parseInt(searchParams.get('limit') || '100', 10) || 100));
 
-    const endDate = new Date();
-    const startDate = new Date();
-
-    switch (period) {
-      case 'today':
-        startDate.setHours(0, 0, 0, 0);
-        break;
-      case 'week':
-        startDate.setDate(startDate.getDate() - 7);
-        break;
-      case 'month':
-        startDate.setMonth(startDate.getMonth() - 1);
-        break;
-      case 'year':
-        startDate.setFullYear(startDate.getFullYear() - 1);
-        break;
-      default:
-        startDate.setDate(startDate.getDate() - 7);
-    }
-
-    const startIso = startDate.toISOString();
-    const endIso = endDate.toISOString();
+    const range = getPeriodRangeUtc(period);
+    const startIso = range.startDate.toISOString();
+    const endIso = range.endDate.toISOString();
 
     const { data: posts, error } = await (supabaseAdmin
       .from('posts') as any)
@@ -146,8 +160,8 @@ export async function GET(request: NextRequest) {
 
     const response = NextResponse.json({
       period,
-      startDate: startDate.toISOString().split('T')[0],
-      endDate: endDate.toISOString().split('T')[0],
+      startDate: range.startDay,
+      endDate: range.endDay,
       posts: items,
       live: sync ? 'requested' : 'off',
       syncInfo,

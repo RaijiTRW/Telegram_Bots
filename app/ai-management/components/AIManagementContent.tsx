@@ -706,7 +706,7 @@ export default function AIManagementContent() {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(350px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(min(350px, 100%), 1fr))',
           gap: '20px',
         }}
       >

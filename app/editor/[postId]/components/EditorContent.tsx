@@ -14,6 +14,7 @@ interface Post {
   plain_text: string;
   status: 'pending' | 'published' | 'rejected' | 'draft';
   ai_generated?: boolean;
+  source?: { name: string; url: string | null } | null;
   created_at: string;
   channels?: {
     id: string;
@@ -69,13 +70,23 @@ export default function EditorContent({ post: initialPost }: { post: Post }) {
     }
   };
 
-  const handlePublish = async () => {
+  const handlePublish = async (opts?: { republish?: boolean }) => {
+    const republish = opts?.republish === true;
+    if (republish) {
+      const ok = window.confirm('Переопубликовать этот пост в Telegram ещё раз?');
+      if (!ok) return;
+    }
+
     await handleSave();
     setIsPublishing(true);
     setPublishError(null);
 
     try {
-      const response = await fetch(`/api/posts/${initialPost.id}/publish`, {
+      const url = republish
+        ? `/api/posts/${initialPost.id}/publish?republish=1`
+        : `/api/posts/${initialPost.id}/publish`;
+
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       });
@@ -87,7 +98,7 @@ export default function EditorContent({ post: initialPost }: { post: Post }) {
       }
 
       setStatus('published');
-      setSaveMessage('Опубликовано в Telegram!');
+      setSaveMessage(republish ? 'Переопубликовано в Telegram!' : 'Опубликовано в Telegram!');
       setTimeout(() => router.push('/dashboard'), 2000);
     } catch (error: any) {
       console.error('Ошибка публикации:', error);
@@ -328,11 +339,11 @@ export default function EditorContent({ post: initialPost }: { post: Post }) {
           )}
         </div>
 
-        {/* Опубликовать */}
-        {status !== 'published' && (
+        {/* Опубликовать / Переопубликовать */}
+        {status !== 'published' ? (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
             <button
-              onClick={handlePublish}
+              onClick={() => handlePublish()}
               disabled={isSaving || isPublishing}
               style={{
                 padding: '12px 28px',
@@ -369,6 +380,60 @@ export default function EditorContent({ post: initialPost }: { post: Post }) {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
                   </svg>
                   Опубликовать в Telegram
+                </>
+              )}
+            </button>
+            {publishError && (
+              <span style={{
+                fontSize: '12px',
+                color: '#ef4444',
+                maxWidth: '300px',
+                textAlign: 'right',
+              }}>
+                {publishError}
+              </span>
+            )}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
+            <button
+              onClick={() => handlePublish({ republish: true })}
+              disabled={isSaving || isPublishing}
+              style={{
+                padding: '12px 28px',
+                fontSize: '14px',
+                fontWeight: 600,
+                color: 'white',
+                backgroundColor: 'var(--primary)',
+                border: 'none',
+                borderRadius: '10px',
+                cursor: (isSaving || isPublishing) ? 'wait' : 'pointer',
+                opacity: (isSaving || isPublishing) ? 0.7 : 1,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                boxShadow: '0 4px 12px rgba(37, 99, 235, 0.25)',
+                transition: 'all 0.2s',
+              }}
+            >
+              {isPublishing ? (
+                <>
+                  <div style={{
+                    width: '16px',
+                    height: '16px',
+                    border: '2px solid rgba(255,255,255,0.3)',
+                    borderTopColor: 'white',
+                    borderRadius: '50%',
+                    animation: 'spin 0.8s linear infinite',
+                  }} />
+                  Публикация...
+                </>
+              ) : (
+                <>
+                  <svg style={{ width: '16px', height: '16px' }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Переопубликовать
                 </>
               )}
             </button>

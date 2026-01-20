@@ -1,8 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import Link from 'next/link';
-import { Card } from '@/components/ui';
+import { useRouter } from 'next/navigation';
 import { StatusBadge } from './StatusBadge';
 import { formatDate, formatRelativeTime } from '@/lib/utils/dateFormat';
 import { truncateText } from '@/lib/utils/textHelpers';
@@ -15,6 +14,10 @@ interface PostCardProps {
     status: 'pending' | 'published' | 'rejected' | 'draft' | 'archived';
     created_at: string;
     updated_at: string;
+    source?: {
+      name: string;
+      url: string | null;
+    };
     channels?: {
       name: string;
       topic: string;
@@ -24,8 +27,10 @@ interface PostCardProps {
 }
 
 export function PostCard({ post, onUpdate }: PostCardProps) {
+  const router = useRouter();
   const [isDeleting, setIsDeleting] = useState(false);
   const [isArchiving, setIsArchiving] = useState(false);
+  const [isRepublishing, setIsRepublishing] = useState(false);
 
   const handleArchive = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -76,9 +81,44 @@ export function PostCard({ post, onUpdate }: PostCardProps) {
       setIsDeleting(false);
     }
   };
+
+  const handleRepublish = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (post.status !== 'published') return;
+    if (!confirm('Переопубликовать этот пост в Telegram ещё раз?')) return;
+
+    setIsRepublishing(true);
+    try {
+      const response = await fetch(`/api/posts/${post.id}/publish?republish=1`, {
+        method: 'POST',
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Ошибка переопубликации');
+      }
+      onUpdate?.();
+    } catch (error) {
+      alert('Не удалось переопубликовать пост');
+    } finally {
+      setIsRepublishing(false);
+    }
+  };
+
   return (
-    <Link href={`/editor/${post.id}`} style={{ textDecoration: 'none' }}>
-      <div style={{
+    <div
+      role="link"
+      tabIndex={0}
+      aria-label={`Открыть пост: ${post.title || 'Без заголовка'}`}
+      onClick={() => router.push(`/editor/${post.id}`)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          router.push(`/editor/${post.id}`);
+        }
+      }}
+      style={{
         padding: '32px',
         backgroundColor: 'var(--surface)',
         border: '1px solid var(--border)',
@@ -87,7 +127,8 @@ export function PostCard({ post, onUpdate }: PostCardProps) {
         transition: 'all 0.2s',
         height: '100%',
         display: 'flex',
-        flexDirection: 'column'
+        flexDirection: 'column',
+        outline: 'none',
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.borderColor = 'var(--primary)';
@@ -96,7 +137,16 @@ export function PostCard({ post, onUpdate }: PostCardProps) {
       onMouseLeave={(e) => {
         e.currentTarget.style.borderColor = 'var(--border)';
         e.currentTarget.style.boxShadow = 'none';
-      }}>
+      }}
+      onFocus={(e) => {
+        e.currentTarget.style.borderColor = 'var(--primary)';
+        e.currentTarget.style.boxShadow = '0 8px 24px rgba(0, 0, 0, 0.08)';
+      }}
+      onBlur={(e) => {
+        e.currentTarget.style.borderColor = 'var(--border)';
+        e.currentTarget.style.boxShadow = 'none';
+      }}
+    >
         {/* Статус и канал */}
         <div style={{
           display: 'flex',
@@ -134,6 +184,43 @@ export function PostCard({ post, onUpdate }: PostCardProps) {
               }}>
                 {post.channels.topic}
               </span>
+              {post.source?.name && (
+                <>
+                  <span style={{ color: 'var(--text-tertiary)' }}>•</span>
+                  {post.source.url ? (
+                    <a
+                      href={post.source.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      title={post.source.name}
+                      style={{
+                        color: 'var(--text-tertiary)',
+                        textDecoration: 'none',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        maxWidth: '220px',
+                      }}
+                    >
+                      Источник: {post.source.name}
+                    </a>
+                  ) : (
+                    <span
+                      title={post.source.name}
+                      style={{
+                        color: 'var(--text-tertiary)',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        maxWidth: '220px',
+                      }}
+                    >
+                      Источник: {post.source.name}
+                    </span>
+                  )}
+                </>
+              )}
             </div>
           )}
           <StatusBadge status={post.status} size="sm" />
@@ -269,7 +356,6 @@ export function PostCard({ post, onUpdate }: PostCardProps) {
             </div>
           )}
         </div>
-      </div>
-    </Link>
+    </div>
   );
 }

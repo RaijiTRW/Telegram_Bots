@@ -55,7 +55,8 @@ export default function AnalyticsPage() {
   const [postsData, setPostsData] = useState<PostsAnalyticsData | null>(null);
   const [isPostsLoading, setIsPostsLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [telegramConnected, setTelegramConnected] = useState<boolean | null>(null);
+  const [telegramConnected, setTelegramConnected] = useState<boolean | null>(null); // has saved session
+  const [telegramAuthorized, setTelegramAuthorized] = useState<boolean | null>(null); // can authorize now
   const [error, setError] = useState<string | null>(null);
 
   const fetchAnalytics = useCallback(async () => {
@@ -63,7 +64,7 @@ export default function AnalyticsPage() {
     setError(null);
 
     try {
-      const live = telegramConnected === true;
+      const live = telegramAuthorized === true;
       const response = await fetch(
         `/api/analytics/channels?period=${period}${live ? '&sync=1' : ''}`,
         { cache: 'no-store' }
@@ -87,7 +88,7 @@ export default function AnalyticsPage() {
     setError(null);
 
     try {
-      const live = opts?.live && telegramConnected === true;
+      const live = opts?.live && telegramAuthorized === true;
       const response = await fetch(
         `/api/analytics/posts?period=${period}${live ? '&sync=1&syncLimit=20' : ''}`,
         { cache: 'no-store' }
@@ -110,9 +111,11 @@ export default function AnalyticsPage() {
     try {
       const response = await fetch('/api/telegram/status');
       const result = await response.json();
-      setTelegramConnected(result.authorized);
+      setTelegramConnected(!!result.hasSession);
+      setTelegramAuthorized(!!result.authorized);
     } catch {
       setTelegramConnected(false);
+      setTelegramAuthorized(false);
     }
   };
 
@@ -156,7 +159,7 @@ export default function AnalyticsPage() {
 
   // Live refresh posts stats (near real-time) while analytics page is open
   useEffect(() => {
-    if (telegramConnected !== true) return;
+    if (telegramAuthorized !== true) return;
 
     const id = setInterval(() => {
       fetchPostsAnalytics({ live: true });
@@ -164,7 +167,7 @@ export default function AnalyticsPage() {
     }, 30000);
 
     return () => clearInterval(id);
-  }, [telegramConnected, fetchPostsAnalytics, fetchAnalytics]);
+  }, [telegramAuthorized, fetchPostsAnalytics, fetchAnalytics]);
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
@@ -172,8 +175,8 @@ export default function AnalyticsPage() {
 
       <main style={{
         flex: 1,
-        marginLeft: '288px',
-        padding: '48px 64px',
+        marginLeft: 'var(--sidebar-offset)',
+        padding: 'var(--page-padding-y) var(--page-padding-x)',
         backgroundColor: 'var(--background)',
       }}>
         {/* Header */}
@@ -205,19 +208,19 @@ export default function AnalyticsPage() {
 
             <button
               onClick={handleSync}
-              disabled={isSyncing || !telegramConnected}
+              disabled={isSyncing || telegramAuthorized !== true}
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 gap: '8px',
                 padding: '12px 24px',
-                backgroundColor: telegramConnected ? 'var(--primary)' : 'var(--surface)',
-                color: telegramConnected ? 'white' : 'var(--text-secondary)',
-                border: telegramConnected ? 'none' : '1px solid var(--border)',
+                backgroundColor: telegramAuthorized ? 'var(--primary)' : 'var(--surface)',
+                color: telegramAuthorized ? 'white' : 'var(--text-secondary)',
+                border: telegramAuthorized ? 'none' : '1px solid var(--border)',
                 borderRadius: '12px',
                 fontSize: '14px',
                 fontWeight: '600',
-                cursor: isSyncing || !telegramConnected ? 'not-allowed' : 'pointer',
+                cursor: isSyncing || telegramAuthorized !== true ? 'not-allowed' : 'pointer',
                 opacity: isSyncing ? 0.7 : 1,
               }}
             >
@@ -316,6 +319,62 @@ export default function AnalyticsPage() {
               }}
             >
               Подключить
+            </a>
+          </div>
+        )}
+
+        {/* Telegram session exists but cannot authorize right now */}
+        {telegramConnected === true && telegramAuthorized === false && (
+          <div style={{
+            padding: '20px 24px',
+            backgroundColor: 'rgba(234, 179, 8, 0.1)',
+            border: '1px solid rgba(234, 179, 8, 0.3)',
+            borderRadius: '12px',
+            marginBottom: '32px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '16px',
+          }}>
+            <div style={{
+              width: '40px',
+              height: '40px',
+              borderRadius: '10px',
+              backgroundColor: 'rgba(234, 179, 8, 0.2)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}>
+              <span style={{ fontSize: '20px' }}>⚠️</span>
+            </div>
+            <div style={{ flex: 1 }}>
+              <h4 style={{
+                fontSize: '15px',
+                fontWeight: '600',
+                color: 'var(--foreground)',
+                marginBottom: '4px',
+              }}>
+                Telegram сессия сохранена, но недоступна
+              </h4>
+              <p style={{
+                fontSize: '14px',
+                color: 'var(--text-secondary)',
+              }}>
+                Проверьте интернет/лимиты Telegram или переподключите аккаунт.
+              </p>
+            </div>
+            <a
+              href="/settings/telegram"
+              style={{
+                padding: '10px 20px',
+                backgroundColor: 'rgba(234, 179, 8, 0.2)',
+                color: 'rgb(202, 138, 4)',
+                borderRadius: '8px',
+                fontSize: '14px',
+                fontWeight: '600',
+                textDecoration: 'none',
+              }}
+            >
+              Проверить
             </a>
           </div>
         )}

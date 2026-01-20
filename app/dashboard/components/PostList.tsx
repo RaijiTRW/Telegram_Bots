@@ -12,6 +12,10 @@ interface Post {
   status: 'pending' | 'published' | 'rejected' | 'draft' | 'archived';
   created_at: string;
   updated_at: string;
+  source?: {
+    name: string;
+    url: string | null;
+  };
   channels?: {
     name: string;
     topic: string;

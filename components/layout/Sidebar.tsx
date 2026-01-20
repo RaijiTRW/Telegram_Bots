@@ -2,7 +2,6 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import clsx from 'clsx';
 import { useEffect, useMemo, useState } from 'react';
 
 interface NavItem {
@@ -78,6 +77,8 @@ const navigation: NavItem[] = [
 export function Sidebar({ user }: SidebarProps) {
   const pathname = usePathname();
   const [resolvedUser, setResolvedUser] = useState<SidebarProps['user']>(user);
+  const [isOpen, setIsOpen] = useState(false);
+  const appVersion = process.env.NEXT_PUBLIC_APP_VERSION;
 
   const fallbackUser = useMemo(() => {
     const email = resolvedUser?.email || user?.email;
@@ -109,18 +110,77 @@ export function Sidebar({ user }: SidebarProps) {
     return () => controller.abort();
   }, [user?.email]);
 
+  useEffect(() => {
+    setIsOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [isOpen]);
+
   return (
-    <aside style={{
+    <>
+      <button
+        type="button"
+        aria-label={isOpen ? 'Закрыть меню' : 'Открыть меню'}
+        onClick={() => setIsOpen(v => !v)}
+        className="sidebar-menu-btn"
+        style={{
+          position: 'fixed',
+          left: '12px',
+          top: '12px',
+          width: '44px',
+          height: '44px',
+          borderRadius: '12px',
+          border: '1px solid var(--border)',
+          backgroundColor: 'var(--surface)',
+          color: 'var(--foreground)',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 220,
+          boxShadow: 'var(--shadow-sm)',
+        }}
+      >
+        <svg style={{ width: '22px', height: '22px' }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          {isOpen ? (
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          ) : (
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+          )}
+        </svg>
+      </button>
+
+      {isOpen && (
+        <div
+          className="sidebar-backdrop"
+          onClick={() => setIsOpen(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(0,0,0,0.35)',
+            zIndex: 190,
+          }}
+        />
+      )}
+
+      <aside style={{
       position: 'fixed',
       left: 0,
       top: 0,
       bottom: 0,
-      width: '288px',
+      width: 'var(--sidebar-width)',
       backgroundColor: 'var(--surface)',
       borderRight: '1px solid var(--border)',
       display: 'flex',
       flexDirection: 'column',
-      zIndex: 100
+      zIndex: 200,
+      transform: isOpen ? 'translateX(0)' : 'translateX(calc(-1 * var(--sidebar-width)))',
+      transition: 'transform var(--transition-slow)',
     }}>
       {/* Logo */}
       <div style={{
@@ -171,6 +231,7 @@ export function Sidebar({ user }: SidebarProps) {
             <Link
               key={item.href}
               href={item.href}
+              onClick={() => setIsOpen(false)}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -255,6 +316,18 @@ export function Sidebar({ user }: SidebarProps) {
             }}>
               {fallbackUser?.email || 'admin@example.com'}
             </p>
+            {appVersion && (
+              <p style={{
+                fontSize: '11px',
+                color: 'var(--text-muted)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                marginTop: '4px'
+              }}>
+                v{appVersion}
+              </p>
+            )}
           </div>
           <button
             onClick={async () => {
@@ -294,6 +367,25 @@ export function Sidebar({ user }: SidebarProps) {
           </button>
         </div>
       </div>
-    </aside>
+      </aside>
+
+      <style jsx>{`
+        .sidebar-menu-btn {
+          display: none;
+        }
+
+        @media (max-width: 1023px) {
+          .sidebar-menu-btn {
+            display: flex;
+          }
+        }
+
+        @media (min-width: 1024px) {
+          aside {
+            transform: translateX(0) !important;
+          }
+        }
+      `}</style>
+    </>
   );
 }

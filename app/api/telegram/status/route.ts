@@ -19,6 +19,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       connected: status.connected,
       authorized: status.authorized,
+      hasSession: status.hasSession,
       phoneNumber: status.phoneNumber,
     });
   } catch (error) {
@@ -27,6 +28,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       connected: false,
       authorized: false,
+      hasSession: false,
     });
   }
 }

@@ -38,15 +38,47 @@ export default async function EditorPage({ params }: PageProps) {
     notFound();
   }
 
+  let source: { name: string; url: string | null } | null = null;
+  try {
+    const ids = Array.isArray((post as any).source_content_ids) ? (post as any).source_content_ids : [];
+    const primaryId = ids.length > 0 ? String(ids[0]) : null;
+
+    if (primaryId) {
+      const { data: parsedRows, error: parsedError } = await (supabaseAdmin
+        .from('parsed_content') as any)
+        .select('url, sources(name, url)')
+        .eq('id', primaryId)
+        .limit(1);
+
+      if (!parsedError && Array.isArray(parsedRows) && parsedRows[0]) {
+        const row: any = parsedRows[0];
+        const sourceRel = row?.sources;
+        const sourceObj = Array.isArray(sourceRel) ? sourceRel[0] : sourceRel;
+        const sourceUrl = typeof sourceObj?.url === 'string' ? sourceObj.url : null;
+        const sourceName = typeof sourceObj?.name === 'string' ? sourceObj.name : null;
+        const itemUrl = typeof row?.url === 'string' ? row.url : null;
+        if (sourceName || sourceUrl) {
+          source = { name: sourceName || sourceUrl || 'Источник', url: itemUrl || sourceUrl };
+        }
+      }
+    }
+
+    if (!source) {
+      source = (post as any).ai_generated ? { name: 'AI (источник неизвестен)', url: null } : { name: 'Ручной', url: null };
+    }
+  } catch {
+    // ignore
+  }
+
   return (
     <div className="min-h-screen bg-background flex">
       <Sidebar user={userEmail ? { email: userEmail } : undefined} />
 
       {/* Main Content Area */}
-      <main style={{ marginLeft: '288px' }} className="flex-1">
+      <main style={{ marginLeft: 'var(--sidebar-offset)' }} className="flex-1">
         {/* Page Header */}
         <div style={{
-          padding: '32px 64px',
+          padding: 'var(--page-padding-y) var(--page-padding-x)',
           borderBottom: '1px solid var(--border)',
           backgroundColor: 'var(--background)'
         }}>
@@ -94,6 +126,7 @@ export default async function EditorPage({ params }: PageProps) {
                   alignItems: 'center',
                   gap: '8px',
                   fontSize: '15px',
+                  flexWrap: 'wrap',
                 }}>
                   <span style={{ color: 'var(--text-secondary)' }}>Канал:</span>
                   <span style={{
@@ -107,6 +140,26 @@ export default async function EditorPage({ params }: PageProps) {
                   </span>
                   <span style={{ color: 'var(--text-tertiary)' }}>•</span>
                   <span style={{ color: 'var(--text-secondary)' }}>{post.channels.topic}</span>
+                  {source?.name && (
+                    <>
+                      <span style={{ color: 'var(--text-tertiary)' }}>•</span>
+                      {source.url ? (
+                        <a
+                          href={source.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{ color: 'var(--text-tertiary)', textDecoration: 'none' }}
+                          title={source.name}
+                        >
+                          Источник: {source.name}
+                        </a>
+                      ) : (
+                        <span style={{ color: 'var(--text-tertiary)' }} title={source.name}>
+                          Источник: {source.name}
+                        </span>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -114,8 +167,8 @@ export default async function EditorPage({ params }: PageProps) {
         </div>
 
         {/* Editor Content */}
-        <div style={{ padding: '48px 64px', maxWidth: '1000px' }}>
-          <EditorContent post={post} />
+        <div style={{ padding: 'var(--page-padding-y) var(--page-padding-x)', maxWidth: '1000px' }}>
+          <EditorContent post={{ ...(post as any), source }} />
         </div>
       </main>
     </div>

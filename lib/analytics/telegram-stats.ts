@@ -210,7 +210,15 @@ export async function syncAllChannelsStats(userId?: string): Promise<{
   let telegramPostsSynced = 0;
   let telegramPostsFailed = 0;
   const errors: string[] = [];
-  const today = new Date().toISOString().split('T')[0];
+  const now = new Date();
+  const today = now.toISOString().split('T')[0];
+  const hourBucket = new Date(now);
+  hourBucket.setUTCMinutes(0, 0, 0);
+  const hourBucketIso = hourBucket.toISOString();
+  const intradayBucket = new Date(now);
+  const minutes = intradayBucket.getUTCMinutes();
+  intradayBucket.setUTCMinutes(minutes - (minutes % 5), 0, 0);
+  const intradayBucketIso = intradayBucket.toISOString();
   const subscribersTimelineDays = 90;
 
   for (const channel of channels) {
@@ -284,6 +292,43 @@ export async function syncAllChannelsStats(userId?: string): Promise<{
       await saveChannelStats(channel.id, today, {
         subscribers_count: subscribers,
       });
+
+      // 4) Почасовой снимок подписчиков (для графика "Сегодня" по часам)
+      const { error: hourlyError } = await (supabaseAdmin
+        .from('channel_analytics_hourly') as any)
+        .upsert(
+          {
+            channel_id: channel.id,
+            hour: hourBucketIso,
+            subscribers_count: subscribers,
+          },
+          { onConflict: 'channel_id,hour' }
+        );
+      // Don't fail the whole sync if migration isn't applied yet.
+      if (hourlyError) {
+        const msg = String((hourlyError as any)?.message || hourlyError);
+        if (!msg.toLowerCase().includes('does not exist') && !msg.toLowerCase().includes('relation')) {
+          console.warn('[analytics] hourly snapshot upsert error:', msg);
+        }
+      }
+
+      // 5) Внутридневной снимок (каждые 5 минут) — чтобы видеть точный момент изменения за сегодня
+      const { error: intradayError } = await (supabaseAdmin
+        .from('channel_analytics_intraday') as any)
+        .upsert(
+          {
+            channel_id: channel.id,
+            bucket: intradayBucketIso,
+            subscribers_count: subscribers,
+          },
+          { onConflict: 'channel_id,bucket' }
+        );
+      if (intradayError) {
+        const msg = String((intradayError as any)?.message || intradayError);
+        if (!msg.toLowerCase().includes('does not exist') && !msg.toLowerCase().includes('relation')) {
+          console.warn('[analytics] intraday snapshot upsert error:', msg);
+        }
+      }
 
       synced++;
     } catch (error: any) {
@@ -859,6 +904,46 @@ function listDates(startDate: string, endDate: string): string[] {
   return dates;
 }
 
+function listHoursUtcForDay(day: string): string[] {
+  const start = new Date(`${day}T00:00:00.000Z`);
+  const now = new Date();
+  const end = new Date(now);
+  end.setUTCMinutes(0, 0, 0);
+
+  // If server day differs from requested day, return full 24 hours for that day.
+  if (end.toISOString().slice(0, 10) !== day) {
+    end.setTime(new Date(`${day}T23:00:00.000Z`).getTime());
+  }
+
+  const hours: string[] = [];
+  for (let d = new Date(start); d <= end; d.setUTCHours(d.getUTCHours() + 1)) {
+    hours.push(new Date(d).toISOString());
+  }
+  return hours;
+}
+
+function listIntradayBucketsUtcForDay(day: string, bucketMinutes: number): string[] {
+  const safeBucket = Math.max(1, Math.min(60, Math.floor(bucketMinutes)));
+  const start = new Date(`${day}T00:00:00.000Z`);
+  const now = new Date();
+  const end = new Date(now);
+  const minutes = end.getUTCMinutes();
+  end.setUTCMinutes(minutes - (minutes % safeBucket), 0, 0);
+
+  if (end.toISOString().slice(0, 10) !== day) {
+    const endOfDay = new Date(`${day}T23:59:59.999Z`);
+    const m2 = endOfDay.getUTCMinutes();
+    endOfDay.setUTCMinutes(m2 - (m2 % safeBucket), 0, 0);
+    end.setTime(endOfDay.getTime());
+  }
+
+  const buckets: string[] = [];
+  for (let d = new Date(start); d <= end; d.setUTCMinutes(d.getUTCMinutes() + safeBucket)) {
+    buckets.push(new Date(d).toISOString());
+  }
+  return buckets;
+}
+
 /**
  * Получить статистику канала из БД за период
  */
@@ -934,7 +1019,8 @@ export async function getChannelStatsFromDB(
 export async function getAllChannelsStats(
   _userId: string,
   startDate: string,
-  endDate: string
+  endDate: string,
+  options?: { granularity?: 'day' | 'hour' | 'intraday' }
 ): Promise<{
   totalSubscribers: number;
   subscribersGained: number;
@@ -974,10 +1060,73 @@ export async function getAllChannelsStats(
     };
   }
 
-  const days = listDates(startDate, endDate);
-  const timeline = days.map(date => ({ date, subscribers: 0, gained: 0, lost: 0 }));
-  const timelineByDate = new Map<string, { date: string; subscribers: number; gained: number; lost: number }>();
-  for (const t of timeline) timelineByDate.set(t.date, t);
+  const useIntraday = options?.granularity === 'intraday' && startDate === endDate;
+  const useHourly = options?.granularity === 'hour' && startDate === endDate;
+  const keys = useIntraday
+    ? listIntradayBucketsUtcForDay(startDate, 5)
+    : useHourly
+      ? listHoursUtcForDay(startDate)
+      : listDates(startDate, endDate);
+  const timeline = keys.map(date => ({ date, subscribers: 0, gained: 0, lost: 0 }));
+  const timelineByKey = new Map<string, { date: string; subscribers: number; gained: number; lost: number }>();
+  for (const t of timeline) timelineByKey.set(t.date, t);
+
+  let intradayByChannel: Map<string, Map<string, number>> | null = null;
+  if (useIntraday) {
+    const dayStart = `${startDate}T00:00:00.000Z`;
+    const dayEnd = `${startDate}T23:59:59.999Z`;
+
+    const { data: intradayRows, error: intradayError } = await (supabaseAdmin
+      .from('channel_analytics_intraday') as any)
+      .select('channel_id, bucket, subscribers_count')
+      .gte('bucket', dayStart)
+      .lte('bucket', dayEnd)
+      .limit(20000);
+
+    if (!intradayError && Array.isArray(intradayRows)) {
+      intradayByChannel = new Map();
+      for (const r of intradayRows) {
+        const channelId = String(r?.channel_id || '');
+        if (!channelId) continue;
+        const dt = new Date(String(r?.bucket));
+        const mins = dt.getUTCMinutes();
+        dt.setUTCMinutes(mins - (mins % 5), 0, 0);
+        const bucketIso = dt.toISOString();
+        const count = Number(r?.subscribers_count || 0);
+        if (!Number.isFinite(count)) continue;
+        if (!intradayByChannel.has(channelId)) intradayByChannel.set(channelId, new Map());
+        intradayByChannel.get(channelId)!.set(bucketIso, count);
+      }
+    }
+  }
+
+  let hourlyByChannel: Map<string, Map<string, number>> | null = null;
+  if (useHourly) {
+    const dayStart = `${startDate}T00:00:00.000Z`;
+    const dayEnd = `${startDate}T23:00:00.000Z`;
+
+    const { data: hourlyRows, error: hourlyError } = await (supabaseAdmin
+      .from('channel_analytics_hourly') as any)
+      .select('channel_id, hour, subscribers_count')
+      .gte('hour', dayStart)
+      .lte('hour', dayEnd)
+      .limit(5000);
+
+    if (!hourlyError && Array.isArray(hourlyRows)) {
+      hourlyByChannel = new Map();
+      for (const r of hourlyRows) {
+        const channelId = String(r?.channel_id || '');
+        if (!channelId) continue;
+        const dt = new Date(String(r?.hour));
+        dt.setUTCMinutes(0, 0, 0);
+        const hourIso = dt.toISOString();
+        const count = Number(r?.subscribers_count || 0);
+        if (!Number.isFinite(count)) continue;
+        if (!hourlyByChannel.has(channelId)) hourlyByChannel.set(channelId, new Map());
+        hourlyByChannel.get(channelId)!.set(hourIso, count);
+      }
+    }
+  }
 
   let totalSubscribers = 0;
   let subscribersGained = 0;
@@ -995,23 +1144,49 @@ export async function getAllChannelsStats(
     totalViews += stats.totalViews;
     totalPosts += stats.totalPosts;
 
-    const dailyByDate = new Map<string, ChannelAnalyticsRow>();
-    for (const row of stats.dailyStats) {
-      if (row?.date) dailyByDate.set(row.date, row);
-    }
+    if (useIntraday || useHourly) {
+      const timeMap = (useIntraday ? intradayByChannel?.get(channel.id) : hourlyByChannel?.get(channel.id)) || null;
+      const fallbackSubscribers = stats.totalSubscribers;
 
-    let lastSubscribers = stats.baseSubscribers;
-    for (const date of days) {
-      const row = dailyByDate.get(date);
-      if (row && row.subscribers_count !== null && row.subscribers_count !== undefined) {
-        lastSubscribers = Number(row.subscribers_count || 0);
+      let lastSubscribers = stats.baseSubscribers;
+      if ((!Number.isFinite(lastSubscribers) || lastSubscribers <= 0) && timeMap && timeMap.size > 0) {
+        // If we have no base, backfill start-of-day with first known snapshot
+        const first = Array.from(timeMap.entries()).sort((a, b) => (a[0] < b[0] ? -1 : 1))[0];
+        lastSubscribers = Number(first?.[1] ?? lastSubscribers);
+      } else if (!timeMap) {
+        lastSubscribers = fallbackSubscribers;
       }
 
-      const t = timelineByDate.get(date);
-      if (!t) continue;
-      t.subscribers += lastSubscribers;
-      t.gained += Number(row?.subscribers_gained || 0);
-      t.lost += Number(row?.subscribers_lost || 0);
+      for (const iso of keys) {
+        if (timeMap && timeMap.has(iso)) {
+          lastSubscribers = Number(timeMap.get(iso) || 0);
+        } else if (!timeMap) {
+          lastSubscribers = fallbackSubscribers;
+        }
+
+        const t = timelineByKey.get(iso);
+        if (!t) continue;
+        t.subscribers += lastSubscribers;
+      }
+    } else {
+      const dailyByDate = new Map<string, ChannelAnalyticsRow>();
+      for (const row of stats.dailyStats) {
+        if (row?.date) dailyByDate.set(row.date, row);
+      }
+
+      let lastSubscribers = stats.baseSubscribers;
+      for (const date of keys) {
+        const row = dailyByDate.get(date);
+        if (row && row.subscribers_count !== null && row.subscribers_count !== undefined) {
+          lastSubscribers = Number(row.subscribers_count || 0);
+        }
+
+        const t = timelineByKey.get(date);
+        if (!t) continue;
+        t.subscribers += lastSubscribers;
+        t.gained += Number(row?.subscribers_gained || 0);
+        t.lost += Number(row?.subscribers_lost || 0);
+      }
     }
 
     channelStats.push({
@@ -1022,6 +1197,16 @@ export async function getAllChannelsStats(
       lost: stats.subscribersLost,
       posts: stats.totalPosts,
     });
+  }
+
+  if (useIntraday || useHourly) {
+    for (let i = 1; i < timeline.length; i++) {
+      const prev = Number(timeline[i - 1].subscribers || 0);
+      const cur = Number(timeline[i].subscribers || 0);
+      const delta = cur - prev;
+      timeline[i].gained = Math.max(0, delta);
+      timeline[i].lost = Math.max(0, -delta);
+    }
   }
 
   return {

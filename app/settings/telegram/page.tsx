@@ -15,6 +15,8 @@ export default function TelegramSettingsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [connectedPhone, setConnectedPhone] = useState<string | null>(null);
+  const [isDisconnecting, setIsDisconnecting] = useState(false);
+  const [isAuthorized, setIsAuthorized] = useState<boolean | null>(null);
 
   useEffect(() => {
     checkStatus();
@@ -25,9 +27,10 @@ export default function TelegramSettingsPage() {
       const response = await fetch('/api/telegram/status');
       const data = await response.json();
 
-      if (data.authorized) {
+      if (data.hasSession) {
         setStep('connected');
         setConnectedPhone(data.phoneNumber);
+        setIsAuthorized(!!data.authorized);
       }
     } catch {
       // Ignore errors
@@ -118,14 +121,54 @@ export default function TelegramSettingsPage() {
     await handleVerifyCode();
   };
 
+  const handleDisconnect = async () => {
+    if (isLoading || isDisconnecting) return;
+    const ok = window.confirm('Отвязать Telegram аккаунт от этого пользователя?');
+    if (!ok) return;
+
+    setIsDisconnecting(true);
+    setError(null);
+
+    try {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+      const response = await fetch('/api/telegram/disconnect', {
+        method: 'POST',
+        signal: controller.signal,
+      });
+      clearTimeout(id);
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Ошибка отключения Telegram');
+      }
+
+      setConnectedPhone(null);
+      setPhoneNumber('');
+      setPhoneCode('');
+      setPhoneCodeHash('');
+      setPassword('');
+      setStep('phone');
+    } catch (err: any) {
+      const msg =
+        err?.name === 'AbortError'
+          ? 'Сервер не отвечает. Попробуйте ещё раз.'
+          : err?.message;
+      setError(msg);
+    } finally {
+      setIsDisconnecting(false);
+    }
+  };
+
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
       <Sidebar />
 
       <main style={{
         flex: 1,
-        marginLeft: '288px',
-        padding: '48px 64px',
+        marginLeft: 'var(--sidebar-offset)',
+        padding: 'var(--page-padding-y) var(--page-padding-x)',
         backgroundColor: 'var(--background)',
       }}>
         {/* Header */}
@@ -152,7 +195,7 @@ export default function TelegramSettingsPage() {
           backgroundColor: 'var(--surface)',
           border: '1px solid var(--border)',
           borderRadius: '20px',
-          padding: '40px',
+          padding: 'var(--card-padding)',
         }}>
           {/* Connected State */}
           {step === 'connected' && (
@@ -161,24 +204,23 @@ export default function TelegramSettingsPage() {
                 width: '80px',
                 height: '80px',
                 borderRadius: '50%',
-                backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                backgroundColor: isAuthorized === false ? 'rgba(234, 179, 8, 0.12)' : 'rgba(34, 197, 94, 0.1)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 margin: '0 auto 24px',
               }}>
                 <svg
-                  style={{ width: '40px', height: '40px', color: 'var(--success)' }}
+                  style={{ width: '40px', height: '40px', color: isAuthorized === false ? 'rgb(202, 138, 4)' : 'var(--success)' }}
                   fill="none"
                   viewBox="0 0 24 24"
                   stroke="currentColor"
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M5 13l4 4L19 7"
-                  />
+                  {isAuthorized === false ? (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v4m0 4h.01M10.29 3.86l-8.02 13.9A1.5 1.5 0 003.56 20h16.88a1.5 1.5 0 001.29-2.24l-8.02-13.9a1.5 1.5 0 00-2.42 0z" />
+                  ) : (
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  )}
                 </svg>
               </div>
 
@@ -188,7 +230,7 @@ export default function TelegramSettingsPage() {
                 color: 'var(--foreground)',
                 marginBottom: '12px',
               }}>
-                Telegram подключен
+                {isAuthorized === false ? 'Telegram сохранён' : 'Telegram подключен'}
               </h2>
 
               <p style={{
@@ -196,7 +238,9 @@ export default function TelegramSettingsPage() {
                 color: 'var(--text-secondary)',
                 marginBottom: '8px',
               }}>
-                Аккаунт успешно авторизован
+                {isAuthorized === false
+                  ? 'Сессия сохранена, но сейчас не удалось подключиться к Telegram.'
+                  : 'Аккаунт успешно авторизован'}
               </p>
 
               {connectedPhone && (
@@ -209,36 +253,87 @@ export default function TelegramSettingsPage() {
                 </p>
               )}
 
-              <a
-                href="/analytics"
+              {isAuthorized !== false && (
+                <a
+                  href="/analytics"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    padding: '14px 28px',
+                    backgroundColor: 'var(--primary)',
+                    color: 'white',
+                    borderRadius: '12px',
+                    fontSize: '15px',
+                    fontWeight: '600',
+                    textDecoration: 'none',
+                  }}
+                >
+                  Перейти к аналитике
+                  <svg
+                    style={{ width: '16px', height: '16px' }}
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M13 7l5 5m0 0l-5 5m5-5H6"
+                    />
+                  </svg>
+                </a>
+              )}
+
+              <button
+                type="button"
+                onClick={handleDisconnect}
+                disabled={isDisconnecting}
                 style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  padding: '14px 28px',
-                  backgroundColor: 'var(--primary)',
-                  color: 'white',
+                  marginTop: '14px',
+                  width: '100%',
+                  padding: '12px 16px',
+                  backgroundColor: 'transparent',
+                  color: 'var(--error)',
+                  border: '1px solid rgba(239, 68, 68, 0.35)',
                   borderRadius: '12px',
-                  fontSize: '15px',
+                  fontSize: '14px',
                   fontWeight: '600',
-                  textDecoration: 'none',
+                  cursor: isDisconnecting ? 'not-allowed' : 'pointer',
+                  opacity: isDisconnecting ? 0.7 : 1,
                 }}
               >
-                Перейти к аналитике
-                <svg
-                  style={{ width: '16px', height: '16px' }}
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
+                {isDisconnecting ? 'Отключение...' : 'Отвязать Telegram'}
+              </button>
+
+              {isAuthorized === false && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStep('phone');
+                    setError(null);
+                    setPhoneNumber('');
+                    setPhoneCode('');
+                    setPhoneCodeHash('');
+                    setPassword('');
+                  }}
+                  style={{
+                    marginTop: '10px',
+                    width: '100%',
+                    padding: '12px 16px',
+                    backgroundColor: 'rgba(234, 179, 8, 0.12)',
+                    color: 'rgb(202, 138, 4)',
+                    border: '1px solid rgba(234, 179, 8, 0.35)',
+                    borderRadius: '12px',
+                    fontSize: '14px',
+                    fontWeight: '600',
+                    cursor: 'pointer',
+                  }}
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M13 7l5 5m0 0l-5 5m5-5H6"
-                  />
-                </svg>
-              </a>
+                  Переподключить
+                </button>
+              )}
             </div>
           )}
 

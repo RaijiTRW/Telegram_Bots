@@ -42,6 +42,14 @@ export function SubscribersChart({ timeline, isLoading }: SubscribersChartProps)
 
   const points = (timeline || []).filter(p => p && typeof p.date === 'string');
   const last = points.length > 0 ? points[points.length - 1] : null;
+  const isHourly = points.some(p => typeof p.date === 'string' && p.date.includes('T'));
+  const totals = points.reduce(
+    (acc, p) => ({
+      gained: acc.gained + Number(p?.gained || 0),
+      lost: acc.lost + Number(p?.lost || 0),
+    }),
+    { gained: 0, lost: 0 }
+  );
 
   if (points.length < 2) {
     return (
@@ -62,12 +70,12 @@ export function SubscribersChart({ timeline, isLoading }: SubscribersChartProps)
             fontWeight: '600',
             color: 'var(--foreground)',
           }}>
-            Подписчики по дням
+            {isHourly ? 'Подписчики по часам' : 'Подписчики по дням'}
           </h3>
           {last && (
             <div style={{ display: 'flex', gap: '10px', alignItems: 'baseline' }}>
-              <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--success)' }}>+{last.gained}</span>
-              <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--error)' }}>-{last.lost}</span>
+              <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--success)' }}>+{totals.gained}</span>
+              <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--error)' }}>-{totals.lost}</span>
             </div>
           )}
         </div>
@@ -78,7 +86,9 @@ export function SubscribersChart({ timeline, isLoading }: SubscribersChartProps)
           color: 'var(--text-secondary)',
           fontSize: '14px',
         }}>
-          Пока мало данных для графика. Нажмите «Синхронизировать» и подождите накопления дневной статистики.
+          {isHourly
+            ? 'Пока мало данных для графика по часам. Нажмите «Синхронизировать» и подождите накопления данных за сегодня.'
+            : 'Пока мало данных для графика. Нажмите «Синхронизировать» и подождите накопления дневной статистики.'}
         </div>
       </div>
     );
@@ -119,9 +129,18 @@ export function SubscribersChart({ timeline, isLoading }: SubscribersChartProps)
     'Z',
   ].join(' ');
 
-  const startLabel = points[0]?.date?.slice(5) || '';
-  const midLabel = points[Math.floor(points.length / 2)]?.date?.slice(5) || '';
-  const endLabel = points[points.length - 1]?.date?.slice(5) || '';
+  const formatLabel = (v: string) => {
+    if (!v) return '';
+    if (v.includes('T')) {
+      const d = new Date(v);
+      return d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    }
+    return v.slice(5);
+  };
+
+  const startLabel = formatLabel(points[0]?.date || '');
+  const midLabel = formatLabel(points[Math.floor(points.length / 2)]?.date || '');
+  const endLabel = formatLabel(points[points.length - 1]?.date || '');
 
   return (
     <div style={{
@@ -141,15 +160,21 @@ export function SubscribersChart({ timeline, isLoading }: SubscribersChartProps)
           fontWeight: '600',
           color: 'var(--foreground)',
         }}>
-          Подписчики по дням
+          {isHourly ? 'Подписчики по часам' : 'Подписчики по дням'}
         </h3>
         {last && (
           <div style={{ display: 'flex', gap: '10px', alignItems: 'baseline' }}>
-            <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--success)' }}>+{last.gained}</span>
-            <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--error)' }}>-{last.lost}</span>
+            <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--success)' }}>+{totals.gained}</span>
+            <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--error)' }}>-{totals.lost}</span>
           </div>
         )}
       </div>
+
+      {isHourly && (
+        <div style={{ marginBottom: '10px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
+          Изменения отображаются по времени следующей синхронизации.
+        </div>
+      )}
 
       <svg
         viewBox={`0 0 ${width} ${height}`}
@@ -157,7 +182,7 @@ export function SubscribersChart({ timeline, isLoading }: SubscribersChartProps)
         height={height}
         style={{ display: 'block' }}
         role="img"
-        aria-label="График подписчиков по дням"
+        aria-label={isHourly ? 'График подписчиков по часам' : 'График подписчиков по дням'}
       >
         <defs>
           <linearGradient id="subsArea" x1="0" y1="0" x2="0" y2="1">
@@ -168,6 +193,27 @@ export function SubscribersChart({ timeline, isLoading }: SubscribersChartProps)
 
         <path d={areaD} fill="url(#subsArea)" />
         <path d={d} fill="none" stroke="rgb(37, 99, 235)" strokeWidth="2.5" />
+
+        {/* Mark subscriber changes */}
+        {points
+          .map((p, idx) => ({ p, idx }))
+          .filter(({ p, idx }) => idx > 0 && (Number(p.gained || 0) > 0 || Number(p.lost || 0) > 0))
+          .slice(0, 50)
+          .map(({ p, idx }) => {
+            const gained = Number(p.gained || 0);
+            const lost = Number(p.lost || 0);
+            const color = gained > 0 ? 'var(--success)' : 'var(--error)';
+            return (
+              <circle
+                key={`${p.date}-${idx}`}
+                cx={toX(idx)}
+                cy={toY(Number(p.subscribers || 0))}
+                r="3"
+                fill={color}
+                opacity="0.9"
+              />
+            );
+          })}
 
         <circle
           cx={toX(points.length - 1)}

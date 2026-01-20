@@ -69,6 +69,15 @@
   --spacing-xl: 2rem;
   --spacing-2xl: 3rem;
   --spacing-3xl: 4rem;
+
+  /* Layout */
+  --sidebar-width: 288px;
+  --sidebar-offset: 288px;
+  --page-padding-x: 64px;
+  --page-padding-y: 48px;
+  --content-padding: 64px;
+  --card-padding: 40px;
+  --header-gap: 24px;
 }
 
 @theme {
@@ -117,6 +126,25 @@
   /* Шрифты */
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+}
+
+@media (max-width: 1023px) {
+  :root {
+    --sidebar-offset: 0px;
+    --page-padding-x: 16px;
+    --page-padding-y: 24px;
+    --content-padding: 16px;
+    --card-padding: 20px;
+    --header-gap: 16px;
+  }
+}
+
+@media (min-width: 1024px) and (max-width: 1279px) {
+  :root {
+    --page-padding-x: 32px;
+    --page-padding-y: 32px;
+    --content-padding: 32px;
+  }
 }
 
 * {

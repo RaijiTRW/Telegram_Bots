@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { supabaseAdmin } from '@/lib/supabase/server';
 
+function safeHostname(url: string): string | null {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(request: NextRequest) {
   try {
     const cookieStore = await cookies();
@@ -60,8 +68,62 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const list = (posts || []) as any[];
+
+    // Attach source label for AI-generated posts (based on parsed_content -> sources)
+    const allContentIds = Array.from(
+      new Set(
+        list
+          .flatMap((p) => (Array.isArray(p?.source_content_ids) ? p.source_content_ids : []))
+          .filter((id: any) => typeof id === 'string' && id.length > 0)
+      )
+    );
+
+    const parsedById = new Map<string, any>();
+    if (allContentIds.length > 0) {
+      const { data: parsedRows, error: parsedError } = await (supabaseAdmin
+        .from('parsed_content') as any)
+        .select('id, url, sources(name, url, type)')
+        .in('id', allContentIds)
+        .limit(5000);
+
+      if (!parsedError && Array.isArray(parsedRows)) {
+        for (const row of parsedRows) {
+          if (row?.id) parsedById.set(String(row.id), row);
+        }
+      }
+    }
+
+    const postsWithSource = list.map((p) => {
+      const contentIds = Array.isArray(p?.source_content_ids) ? (p.source_content_ids as any[]) : [];
+      const primaryContentId = contentIds.length > 0 ? String(contentIds[0]) : null;
+      const parsed = primaryContentId ? parsedById.get(primaryContentId) : null;
+      const sourceRel = parsed?.sources;
+      const sourceObj = Array.isArray(sourceRel) ? sourceRel[0] : sourceRel;
+      const sourceUrl = typeof sourceObj?.url === 'string' ? sourceObj.url : null;
+      const sourceNameRaw = typeof sourceObj?.name === 'string' ? sourceObj.name : null;
+
+      const display =
+        (sourceNameRaw && sourceNameRaw.length > 0 ? sourceNameRaw : null) ||
+        (sourceUrl ? safeHostname(sourceUrl) : null);
+
+      const itemUrl = typeof parsed?.url === 'string' && parsed.url.length > 0 ? parsed.url : null;
+
+      const source =
+        display
+          ? { name: display, url: itemUrl || sourceUrl }
+          : p?.ai_generated
+            ? { name: 'AI (источник неизвестен)', url: null }
+            : { name: 'Ручной', url: null };
+
+      return {
+        ...p,
+        source,
+      };
+    });
+
     return NextResponse.json({
-      posts: posts || [],
+      posts: postsWithSource,
       pagination: {
         page,
         limit,

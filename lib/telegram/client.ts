@@ -60,7 +60,7 @@ async function getActiveSession(userId?: string | null): Promise<string | null> 
       query = query.eq('user_id', userId);
     }
 
-    const { data, error } = await query.single();
+    const { data, error } = await query;
 
     if (error) {
       const msg = String(error.message || error);
@@ -70,11 +70,19 @@ async function getActiveSession(userId?: string | null): Promise<string | null> 
       }
     }
 
-    if (error || !data) {
-      return userId ? null : (process.env.TELEGRAM_SESSION || null);
+    const row = Array.isArray(data) ? data[0] : null;
+    if (error || !row?.session_string) {
+      if (userId) {
+        // If user has no session yet but a legacy active session exists (user_id is NULL),
+        // try to "adopt" it for this user to keep the app working after migration.
+        const adopted = await adoptLegacyActiveSessionForUser(userId);
+        if (adopted) return adopted;
+        return null;
+      }
+      return process.env.TELEGRAM_SESSION || null;
     }
 
-    return data.session_string;
+    return row.session_string;
   } catch {
     // Backward-compatible: if user_id column doesn't exist, fall back to global session.
     if (userId) {
@@ -86,6 +94,54 @@ async function getActiveSession(userId?: string | null): Promise<string | null> 
     }
     return userId ? null : (process.env.TELEGRAM_SESSION || null);
   }
+}
+
+async function adoptLegacyActiveSessionForUser(userId: string): Promise<string | null> {
+  if (!userId) return null;
+
+  try {
+    // Only adopt if user does not already have an active session.
+    const { data: existing } = await (supabaseAdmin.from('telegram_sessions') as any)
+      .select('id')
+      .eq('is_active', true)
+      .eq('user_id', userId)
+      .limit(1);
+
+    if (Array.isArray(existing) && existing.length > 0) return null;
+
+    const { data: legacyRows, error: legacyError } = await (supabaseAdmin.from('telegram_sessions') as any)
+      .select('id, session_string')
+      .eq('is_active', true)
+      .is('user_id', null)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (legacyError) {
+      const msg = String(legacyError.message || legacyError);
+      if (msg.toLowerCase().includes('user_id') && msg.toLowerCase().includes('column')) {
+        // No user_id column (old schema) => nothing to adopt.
+        return process.env.TELEGRAM_SESSION || null;
+      }
+      return null;
+    }
+
+    const legacy = Array.isArray(legacyRows) ? legacyRows[0] : null;
+    if (!legacy?.session_string) return null;
+
+    // Bind the legacy session to this user (best-effort).
+    await (supabaseAdmin.from('telegram_sessions') as any)
+      .update({ user_id: userId })
+      .eq('id', legacy.id);
+
+    return legacy.session_string;
+  } catch {
+    return null;
+  }
+}
+
+function isAuthKeyDuplicatedError(error: any): boolean {
+  const msg = String(error?.errorMessage || error?.message || error || '');
+  return msg.includes('AUTH_KEY_DUPLICATED') || msg.includes('406');
 }
 
 export async function saveSession(
@@ -176,6 +232,18 @@ export async function getTelegramClient(userId?: string): Promise<TelegramClient
     try {
       await withTimeout(st.client.connect(), CONNECT_TIMEOUT_MS, 'Telegram connect');
     } catch (e) {
+      if (isAuthKeyDuplicatedError(e)) {
+        // This usually means the same auth key is being used elsewhere.
+        // Deactivate session so user can reconnect and generate a fresh key.
+        if (userId) {
+          try {
+            await deactivateTelegramSessionForUser(userId);
+          } catch {
+            // ignore
+          }
+        }
+        throw new Error('Telegram сессия недействительна (AUTH_KEY_DUPLICATED). Отвяжите и подключите Telegram заново.');
+      }
       try {
         await st.client.disconnect();
       } catch {
@@ -206,6 +274,37 @@ export async function disconnectClient(userId?: string): Promise<void> {
   if (st.client) {
     await st.client.disconnect();
     st.client = null;
+  }
+  st.sessionString = null;
+  st.isConnecting = false;
+}
+
+export async function deactivateTelegramSessionForUser(userId: string): Promise<void> {
+  if (!userId) throw new Error('userId is required');
+
+  try {
+    const { error } = await (supabaseAdmin.from('telegram_sessions') as any)
+      .update({ is_active: false })
+      .eq('is_active', true)
+      .eq('user_id', userId);
+
+    if (error) {
+      const msg = String(error.message || error);
+      // Backward-compatible: old schema without user_id.
+      if (msg.toLowerCase().includes('user_id') && msg.toLowerCase().includes('column')) {
+        await (supabaseAdmin.from('telegram_sessions') as any)
+          .update({ is_active: false })
+          .eq('is_active', true);
+      } else {
+        throw error;
+      }
+    }
+  } finally {
+    try {
+      await disconnectClient(userId);
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -297,28 +396,43 @@ export async function verifyAuthCode(
 export async function getConnectionStatusForUser(userId: string): Promise<{
   connected: boolean;
   authorized: boolean;
+  hasSession: boolean;
   phoneNumber?: string;
 }> {
   try {
-    const { data: session } = await (supabaseAdmin.from('telegram_sessions') as any)
-      .select('phone_number')
+    const query = (supabaseAdmin.from('telegram_sessions') as any)
+      .select('phone_number, session_string')
       .eq('is_active', true)
       .eq('user_id', userId)
-      .single();
+      .order('created_at', { ascending: false })
+      .limit(1);
 
-    const authorized = await isAuthorized(userId);
+    const { data: sessions, error } = await query;
+    if (error) {
+      const msg = String(error.message || error);
+      if (msg.toLowerCase().includes('user_id') && msg.toLowerCase().includes('column')) {
+        return await getConnectionStatus();
+      }
+    }
+
+    const session = Array.isArray(sessions) ? sessions[0] : null;
+    const hasSession = !!(session?.session_string && String(session.session_string).length > 0);
+
+    let authorized = false;
+    if (hasSession) {
+      authorized = await isAuthorized(userId);
+    }
     const st = getState(userId);
 
     return {
       connected: !!st.client?.connected,
       authorized,
+      hasSession,
       phoneNumber: session?.phone_number,
     };
   } catch {
-    return {
-      connected: false,
-      authorized: false,
-    };
+    // Backward-compatible: old schema without user_id or unexpected error.
+    return await getConnectionStatus();
   }
 }
 
@@ -326,28 +440,33 @@ export async function getConnectionStatusForUser(userId: string): Promise<{
 export async function getConnectionStatus(): Promise<{
   connected: boolean;
   authorized: boolean;
+  hasSession: boolean;
   phoneNumber?: string;
 }> {
   try {
-    const { data: session } = await (supabaseAdmin.from('telegram_sessions') as any)
-      .select('phone_number')
+    const { data: sessions } = await (supabaseAdmin.from('telegram_sessions') as any)
+      .select('phone_number, session_string')
       .eq('is_active', true)
       .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
+      .limit(1);
 
-    const authorized = await isAuthorized();
+    const session = Array.isArray(sessions) ? sessions[0] : null;
+    const hasSession = !!(session?.session_string && String(session.session_string).length > 0);
+
+    const authorized = hasSession ? await isAuthorized() : false;
     const st = getState(null);
 
     return {
       connected: !!st.client?.connected,
       authorized,
+      hasSession,
       phoneNumber: session?.phone_number,
     };
   } catch {
     return {
       connected: false,
       authorized: false,
+      hasSession: false,
     };
   }
 }

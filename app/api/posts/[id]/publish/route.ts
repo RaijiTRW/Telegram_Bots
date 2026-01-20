@@ -20,6 +20,9 @@ export async function POST(
     }
 
     const { id } = await params;
+    const republishRequested =
+      request.nextUrl.searchParams.get('republish') === '1' ||
+      request.nextUrl.searchParams.get('republish')?.toLowerCase() === 'true';
 
     // Получаем пост с данными канала
     const { data: post, error: postError } = await (supabaseAdmin
@@ -32,6 +35,20 @@ export async function POST(
       return NextResponse.json(
         { error: 'Пост не найден' },
         { status: 404 }
+      );
+    }
+
+    if (post.status === 'archived') {
+      return NextResponse.json(
+        { error: 'Пост в архиве. Верните его из архива, чтобы опубликовать.' },
+        { status: 400 }
+      );
+    }
+
+    if (post.status === 'published' && !republishRequested) {
+      return NextResponse.json(
+        { error: 'Пост уже опубликован. Используйте переопубликацию.' },
+        { status: 409 }
       );
     }
 
@@ -182,7 +199,8 @@ export async function POST(
 
     return NextResponse.json({
       success: true,
-      message: 'Пост успешно опубликован в Telegram!',
+      republished: republishRequested,
+      message: republishRequested ? 'Пост переопубликован в Telegram!' : 'Пост успешно опубликован в Telegram!',
       telegram_message_id: telegramMessageId,
       analyticsSaved,
       analyticsError: process.env.NODE_ENV === 'production' ? undefined : analyticsError,
